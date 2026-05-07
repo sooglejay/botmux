@@ -25,8 +25,14 @@ const PAGE_HTML = `
   </select>
   <label><input type="checkbox" name="active" checked> active only</label>
 </form>
+<div id="bulk-bar" class="bulk-bar" hidden>
+  <span id="bulk-count"></span>
+  <button type="button" id="bulk-close" class="contrast">关闭选中</button>
+  <button type="button" id="bulk-clear">取消</button>
+</div>
 <table id="sessions-table">
   <thead><tr>
+    <th><input type="checkbox" id="select-all" title="全选当前过滤结果"></th>
     <th>bot</th><th>cli</th><th>status</th><th>title</th><th>workingDir</th>
     <th>spawned</th><th>last</th><th>adopt</th><th></th>
   </tr></thead>
@@ -57,9 +63,22 @@ export function renderSessionsPage(root: HTMLElement) {
   const tbody = root.querySelector<HTMLElement>('#sessions-table tbody')!;
   const filtersForm = root.querySelector<HTMLFormElement>('#filters')!;
   const drawer = root.querySelector<HTMLDialogElement>('#drawer')!;
+  const selectAllBox = root.querySelector<HTMLInputElement>('#select-all')!;
+  const bulkBar = root.querySelector<HTMLElement>('#bulk-bar')!;
+  const bulkCountSpan = root.querySelector<HTMLElement>('#bulk-count')!;
+  const bulkCloseBtn = root.querySelector<HTMLButtonElement>('#bulk-close')!;
+  const bulkClearBtn = root.querySelector<HTMLButtonElement>('#bulk-clear')!;
+
+  // Selection set persists across rerenders (filter changes, SSE updates).
+  // Closed/missing sessions get pruned lazily during rerender so the count
+  // never overstates active selections.
+  const selected = new Set<string>();
 
   function rowHtml(s: any) {
+    const closed = s.status === 'closed';
+    const checked = selected.has(s.sessionId) ? 'checked' : '';
     return `<tr data-id="${escapeHtml(s.sessionId)}">
+      <td><input type="checkbox" class="row-select" ${checked} ${closed ? 'disabled' : ''}></td>
       <td>${escapeHtml(s.botName ?? '')}</td>
       <td><span class="badge cli-${escapeHtml(s.cliId ?? 'unknown')}">${escapeHtml(s.cliId ?? 'unknown')}</span></td>
       <td><span class="status status-${escapeHtml(s.status)}">${escapeHtml(s.status)}</span></td>
@@ -89,7 +108,36 @@ export function renderSessionsPage(root: HTMLElement) {
   }
 
   function rerender() {
-    tbody.innerHTML = filtered().map(rowHtml).join('');
+    const rows = filtered();
+    // Prune selections whose sessions are no longer present OR are now closed
+    // (closed rows are uncheckable; keeping them in `selected` would yield a
+    // misleading bulk-bar count that the user can't act on).
+    for (const sid of [...selected]) {
+      const s = store.sessions.get(sid);
+      if (!s || s.status === 'closed') selected.delete(sid);
+    }
+    tbody.innerHTML = rows.map(rowHtml).join('');
+    syncBulkUi(rows);
+  }
+
+  function syncBulkUi(rows: any[]) {
+    const count = selected.size;
+    bulkBar.hidden = count === 0;
+    bulkCountSpan.textContent = `已选 ${count} 个会话`;
+    // header checkbox tri-state: checked when ALL selectable rows in the
+    // current filter are selected; indeterminate when partial; unchecked when
+    // none. "Selectable" excludes closed rows.
+    const selectable = rows.filter(r => r.status !== 'closed');
+    if (selectable.length === 0) {
+      selectAllBox.checked = false;
+      selectAllBox.indeterminate = false;
+      selectAllBox.disabled = true;
+      return;
+    }
+    selectAllBox.disabled = false;
+    const selectedInView = selectable.filter(r => selected.has(r.sessionId)).length;
+    selectAllBox.checked = selectedInView === selectable.length;
+    selectAllBox.indeterminate = selectedInView > 0 && selectedInView < selectable.length;
   }
 
   function openDrawer(s: any) {
@@ -177,12 +225,94 @@ export function renderSessionsPage(root: HTMLElement) {
   }
 
   tbody.addEventListener('click', e => {
-    const tr = (e.target as HTMLElement).closest<HTMLTableRowElement>('tr[data-id]');
+    const target = e.target as HTMLElement;
+    // Checkbox clicks toggle selection; don't open the drawer.
+    if (target.classList.contains('row-select')) {
+      const tr = target.closest<HTMLTableRowElement>('tr[data-id]');
+      if (!tr) return;
+      const sid = tr.dataset.id!;
+      const cb = target as HTMLInputElement;
+      if (cb.checked) selected.add(sid); else selected.delete(sid);
+      syncBulkUi(filtered());
+      return;
+    }
+    // Clicks on the checkbox cell (around the input, not the input itself)
+    // shouldn't open the drawer either — that's a fat-finger nuisance.
+    const td = target.closest<HTMLTableCellElement>('td');
+    if (td && td.querySelector('.row-select')) return;
+    const tr = target.closest<HTMLTableRowElement>('tr[data-id]');
     if (!tr) return;
     const sid = tr.dataset.id!;
     const s = store.sessions.get(sid);
     if (s) openDrawer(s);
   });
+
+  selectAllBox.addEventListener('change', () => {
+    const rows = filtered().filter(r => r.status !== 'closed');
+    if (selectAllBox.checked) {
+      for (const r of rows) selected.add(r.sessionId);
+    } else {
+      for (const r of rows) selected.delete(r.sessionId);
+    }
+    rerender();
+  });
+
+  bulkClearBtn.addEventListener('click', () => {
+    selected.clear();
+    rerender();
+  });
+
+  bulkCloseBtn.addEventListener('click', async () => {
+    const ids = [...selected];
+    if (ids.length === 0) return;
+    if (!confirm(`关闭选中的 ${ids.length} 个会话？`)) return;
+    bulkCloseBtn.disabled = true;
+    bulkClearBtn.disabled = true;
+    const orig = bulkCloseBtn.textContent;
+    let done = 0;
+    let failed = 0;
+    const failures: string[] = [];
+    bulkCloseBtn.textContent = `关闭中 0/${ids.length}...`;
+    // Concurrency cap: 6 in flight at once. Daemon close is cheap but we don't
+    // want to overwhelm the dashboard or hit per-bot Lark rate limits.
+    const queue = [...ids];
+    async function worker() {
+      while (queue.length) {
+        const sid = queue.shift()!;
+        try {
+          const r = await fetch(`/api/sessions/${encodeURIComponent(sid)}/close`, { method: 'POST' });
+          // closeSession always returns { ok: true } today, but treat
+          // non-ok-body as failure too so future server changes that surface
+          // partial errors via 200 + { ok: false } are accounted for.
+          let body: any = null;
+          try { body = await r.json(); } catch { /* tolerate non-JSON */ }
+          if (!r.ok || body?.ok === false) {
+            failed += 1;
+            const reason = body?.error ?? `HTTP ${r.status}`;
+            failures.push(`${sid.slice(0, 12)}…: ${reason}`);
+          }
+        } catch (e: any) {
+          failed += 1;
+          failures.push(`${sid.slice(0, 12)}…: ${e?.message ?? e}`);
+        } finally {
+          done += 1;
+          bulkCloseBtn.textContent = `关闭中 ${done}/${ids.length}...`;
+        }
+      }
+    }
+    await Promise.all(Array.from({ length: Math.min(6, ids.length) }, () => worker()));
+    bulkCloseBtn.textContent = orig;
+    bulkCloseBtn.disabled = false;
+    bulkClearBtn.disabled = false;
+    selected.clear();
+    rerender();
+    if (failed > 0) {
+      const head = failures.slice(0, 3).join('\n');
+      const more = failures.length > 3 ? `\n... +${failures.length - 3} 个` : '';
+      alert(`关闭完成：成功 ${ids.length - failed} / 失败 ${failed}\n${head}${more}`);
+    }
+  });
+
   filtersForm.addEventListener('input', rerender);
   store.on(rerender);
   rerender();

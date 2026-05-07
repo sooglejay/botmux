@@ -253,6 +253,21 @@ ipcRoute('POST', '/api/groups/:chatId/add-bots', async (req, res, p) => {
   }
 });
 
+// Disband (delete) a chat from this bot's identity. Public route picks an
+// in-chat bot as the executor; this just performs the call.
+ipcRoute('POST', '/api/groups/:chatId/disband', async (_req, res, p) => {
+  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
+  const r = await groupsStore.disbandChat(cachedLarkAppId, p.chatId);
+  jsonRes(res, 200, r);
+});
+
+// Make this bot leave the chat. Always works on a member bot per Lark docs.
+ipcRoute('POST', '/api/groups/:chatId/leave', async (_req, res, p) => {
+  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
+  const r = await groupsStore.leaveChat(cachedLarkAppId, p.chatId);
+  jsonRes(res, 200, r);
+});
+
 // Create a brand-new chat with this bot as creator/owner and `larkAppIds` as
 // initial bot members. The dashboard's public route picks any online daemon
 // to act as creator, then forwards here.

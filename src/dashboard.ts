@@ -309,6 +309,83 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    // Disband a chat. Body: `{ larkAppId }` — the bot whose daemon should
+    // perform the delete. Disband only succeeds when that bot is currently
+    // the chat owner (or creator with operate_as_owner scope, which botmux
+    // doesn't request by default), so the frontend is responsible for picking
+    // a viable bot. The route just proxies and surfaces Lark's error verbatim.
+    let mDisband: RegExpMatchArray | null;
+    if (req.method === 'POST' && (mDisband = url.pathname.match(/^\/api\/groups\/([^/]+)\/disband$/))) {
+      const chatId = decodeURIComponent(mDisband[1]);
+      let parsed: { larkAppId?: unknown };
+      try {
+        const chunks: Buffer[] = [];
+        for await (const c of req) chunks.push(c as Buffer);
+        parsed = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
+      } catch {
+        return jsonRes(res, 400, { ok: false, error: 'bad_json' });
+      }
+      const appId = typeof parsed.larkAppId === 'string' ? parsed.larkAppId : '';
+      if (!appId) return jsonRes(res, 400, { ok: false, error: 'larkAppId_required' });
+      const upstream = await proxyToDaemon(
+        appId, `/api/groups/${encodeURIComponent(chatId)}/disband`,
+        { method: 'POST' },
+      );
+      res.writeHead(upstream.status, { 'content-type': 'application/json' });
+      res.end(await upstream.text());
+      return;
+    }
+
+    // Make selected bots leave a chat. Body: `{ larkAppIds: string[] }`.  Each
+    // bot is removed via its own daemon (Lark allows self-removal under any
+    // role). Per-bot results returned so the UI can show partial successes.
+    let mLeave: RegExpMatchArray | null;
+    if (req.method === 'POST' && (mLeave = url.pathname.match(/^\/api\/groups\/([^/]+)\/leave$/))) {
+      const chatId = decodeURIComponent(mLeave[1]);
+      let parsed: { larkAppIds?: unknown };
+      try {
+        const chunks: Buffer[] = [];
+        for await (const c of req) chunks.push(c as Buffer);
+        parsed = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
+      } catch {
+        return jsonRes(res, 400, { ok: false, error: 'bad_json' });
+      }
+      const ids = Array.isArray(parsed.larkAppIds)
+        ? (parsed.larkAppIds as unknown[]).filter((x): x is string => typeof x === 'string')
+        : [];
+      if (ids.length === 0) return jsonRes(res, 400, { ok: false, error: 'larkAppIds_required' });
+      // Re-check membership on the daemon side before issuing leave — UI cache
+      // can be stale, and Lark's bot-self-remove returns a confusing error if
+      // the bot isn't actually in the chat. Skipping such bots up-front keeps
+      // the per-bot result useful (`not_in_chat`) instead of a vague API error.
+      const result = await Promise.all(ids.map(async appId => {
+        const d = registry.getByAppId(appId);
+        if (!d) return { larkAppId: appId, ok: false, error: 'daemon_offline' };
+        try {
+          const memRes = await fetch(
+            `http://127.0.0.1:${d.ipcPort}/api/groups/${encodeURIComponent(chatId)}/membership`,
+          );
+          const memJson = await memRes.json() as { inChat?: boolean };
+          if (!memJson.inChat) return { larkAppId: appId, ok: false, error: 'not_in_chat' };
+        } catch (e: any) {
+          return { larkAppId: appId, ok: false, error: `membership_check_failed: ${e?.message ?? e}` };
+        }
+        const upstream = await proxyToDaemon(
+          appId, `/api/groups/${encodeURIComponent(chatId)}/leave`,
+          { method: 'POST' },
+        );
+        const text = await upstream.text();
+        let body: any = null;
+        try { body = JSON.parse(text); } catch { /* tolerate */ }
+        return {
+          larkAppId: appId,
+          ok: !!body?.ok,
+          error: body?.ok ? undefined : (body?.error ?? `http_${upstream.status}`),
+        };
+      }));
+      return jsonRes(res, 200, { result });
+    }
+
     // Create a new chat — pick a creator daemon and (optionally) auto-invite
     // the operator into it. Cross-app scoping matters here: Lark `open_id` is
     // app-scoped, so the operator's open_id and the creator daemon must come

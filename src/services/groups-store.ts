@@ -146,6 +146,51 @@ export async function transferChatOwner(
 }
 
 /**
+ * Disband (delete) a chat. The Lark API only succeeds when the calling bot is
+ * the chat's current owner, OR is the creator AND the app holds
+ * `im:chat:operate_as_owner`. Routes that fan-out to multiple bots can use
+ * this best-effort: try each in-chat bot until one succeeds.
+ */
+export async function disbandChat(
+  larkAppId: string, chatId: string,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const client = getBotClient(larkAppId);
+  try {
+    const res: any = await (client as any).im.v1.chat.delete({ path: { chat_id: chatId } });
+    if (res.code !== 0 && res.code !== undefined) {
+      return { ok: false, error: `${res.msg ?? 'unknown'} (code: ${res.code})` };
+    }
+    return { ok: true };
+  } catch (e: any) {
+    return { ok: false, error: e?.message ?? String(e) };
+  }
+}
+
+/**
+ * Make the calling bot leave a chat.  Per Lark docs, self-removal succeeds
+ * regardless of role (owner/manager/member). Useful when the bot can't disband
+ * (not owner, no operate_as_owner scope) but still wants to detach.
+ */
+export async function leaveChat(
+  larkAppId: string, chatId: string,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const client = getBotClient(larkAppId);
+  try {
+    const res: any = await (client as any).im.v1.chatMembers.delete({
+      path: { chat_id: chatId },
+      params: { member_id_type: 'app_id' },
+      data: { id_list: [larkAppId] },
+    });
+    if (res.code !== 0 && res.code !== undefined) {
+      return { ok: false, error: `${res.msg ?? 'unknown'} (code: ${res.code})` };
+    }
+    return { ok: true };
+  } catch (e: any) {
+    return { ok: false, error: e?.message ?? String(e) };
+  }
+}
+
+/**
  * Add bot apps to a chat using a "proxy" bot that's already a member.
  * Uses /open-apis/im/v1/chats/:chat_id/members with member_id_type=app_id.
  * Returns per-id result derived from the API's invalid_id_list.

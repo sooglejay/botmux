@@ -205,7 +205,10 @@ export async function renderGroupsPage(root: HTMLElement) {
         const cls = !m ? 'cell-unknown' : m.error ? 'cell-error' : m.inChat ? 'cell-in' : 'cell-out';
         return `<td class="${cls}" title="${escapeHtml(m?.error ?? '')}">${cell}</td>`;
       }).join('')}
-      <td><button class="add-bots" type="button">Add bots</button></td>
+      <td>
+        <button class="add-bots" type="button">Add bots</button>
+        <button class="manage-chat" type="button">Manage</button>
+      </td>
     </tr>`).join('');
   }
   rerender();
@@ -275,6 +278,106 @@ export async function renderGroupsPage(root: HTMLElement) {
       }
     };
   });
+
+  body.addEventListener('click', async e => {
+    const btn = (e.target as HTMLElement).closest<HTMLButtonElement>('button.manage-chat');
+    if (!btn) return;
+    const tr = btn.closest<HTMLTableRowElement>('tr[data-chat]')!;
+    const chatId = tr.dataset.chat!;
+    const chat = cache.chats.find(c => c.chatId === chatId);
+    if (!chat) return;
+    openManageDrawer(chat);
+  });
+
+  function openManageDrawer(chat: any) {
+    const inChat = chat.memberBots.filter((m: any) => m.inChat) as any[];
+    // Lark `owner_id` returns app_id format for bot owners (string match works).
+    // For user owners it'll be an open_id which won't match any larkAppId.
+    const ownerAppId = typeof chat.ownerId === 'string' ? chat.ownerId : '';
+    drawer.innerHTML = `
+      <article>
+        <header><h3>Manage ${escapeHtml(chat.name ?? chat.chatId)}</h3></header>
+        <p><b>chatId:</b> <code>${escapeHtml(chat.chatId)}</code></p>
+        <p><b>owner:</b> <code>${escapeHtml(chat.ownerId ?? '(unknown)')}</code></p>
+
+        <fieldset>
+          <legend>选择机器人退出群聊</legend>
+          ${inChat.length === 0
+            ? `<p class="empty">没有机器人在群里</p>`
+            : inChat.map((m: any) => `
+              <label class="checkbox-row">
+                <input type="checkbox" name="leave-bot" value="${escapeHtml(m.larkAppId)}">
+                ${escapeHtml(m.botName ?? m.larkAppId)}
+                <small>${m.larkAppId === ownerAppId ? '· 群主' : ''}</small>
+              </label>
+            `).join('')}
+        </fieldset>
+
+        <div class="actions">
+          <button id="g-leave-btn" type="button" ${inChat.length === 0 ? 'disabled' : ''}>选中机器人退出群聊</button>
+          <button id="g-disband-btn" type="button" class="contrast" ${inChat.length === 0 ? 'disabled' : ''}>解散群聊</button>
+        </div>
+        <p class="hint-warn"><small>解散群聊仅当某个在群机器人是群主时才会成功。否则飞书会返回错误，建议改用「退出群聊」。</small></p>
+        <form method="dialog"><button>关闭</button></form>
+      </article>`;
+    drawer.showModal();
+
+    drawer.querySelector<HTMLButtonElement>('#g-leave-btn')!.onclick = async () => {
+      const checked = [...drawer.querySelectorAll<HTMLInputElement>('input[name=leave-bot]:checked')]
+        .map(i => i.value);
+      if (checked.length === 0) { alert('至少选一个机器人'); return; }
+      if (!confirm(`确定让 ${checked.length} 个机器人退出群聊？`)) return;
+      try {
+        const r = await fetch(`/api/groups/${encodeURIComponent(chat.chatId)}/leave`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ larkAppIds: checked }),
+        });
+        const respBody = await r.json();
+        const lines = (respBody.result ?? []).map((x: any) =>
+          `${x.larkAppId}: ${x.ok ? 'OK' : `失败 (${x.error ?? 'unknown'})`}`
+        ).join('\n');
+        alert(lines || `Unexpected: ${JSON.stringify(respBody)}`);
+        await loadGroups(); rerender();
+      } catch (e) {
+        alert('Network error: ' + e);
+      } finally {
+        drawer.close();
+      }
+    };
+
+    drawer.querySelector<HTMLButtonElement>('#g-disband-btn')!.onclick = async () => {
+      if (inChat.length === 0) return;
+      if (!confirm(`确定解散群聊「${chat.name ?? chat.chatId}」？此操作不可恢复。`)) return;
+      // Try the owner bot first (highest success probability), then fall back
+      // to other in-chat bots in case our ownerId match was wrong (e.g. owner
+      // is a user, but a creator-bot with operate_as_owner scope is in chat).
+      const ordered = [...inChat].sort((a, b) =>
+        (b.larkAppId === ownerAppId ? 1 : 0) - (a.larkAppId === ownerAppId ? 1 : 0)
+      );
+      const errs: string[] = [];
+      for (const m of ordered) {
+        try {
+          const r = await fetch(`/api/groups/${encodeURIComponent(chat.chatId)}/disband`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ larkAppId: m.larkAppId }),
+          });
+          const respBody = await r.json();
+          if (respBody.ok) {
+            alert(`已解散（由 ${m.botName ?? m.larkAppId} 执行）`);
+            await loadGroups(); rerender();
+            drawer.close();
+            return;
+          }
+          errs.push(`${m.botName ?? m.larkAppId}: ${respBody.error ?? r.status}`);
+        } catch (e) {
+          errs.push(`${m.botName ?? m.larkAppId}: ${e}`);
+        }
+      }
+      alert(`所有在群机器人均无法解散：\n${errs.join('\n')}\n\n建议改用「退出群聊」。`);
+    };
+  }
 
   form.addEventListener('input', rerender);
 }
