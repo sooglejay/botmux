@@ -8,8 +8,10 @@ import * as scheduleStore from '../services/schedule-store.js';
 import * as groupsStore from '../services/groups-store.js';
 import * as oncallStore from '../services/oncall-store.js';
 import * as scheduler from './scheduler.js';
-import { listActiveSessions, findActiveBySessionId, closeSession } from './worker-pool.js';
+import { listActiveSessions, findActiveBySessionId, closeSession, getActiveSessionsRegistry } from './worker-pool.js';
 import { replyMessage, sendMessage } from '../im/lark/client.js';
+import { resumeSession } from './session-manager.js';
+import { getCliDisplayName } from '../im/lark/card-builder.js';
 import { locateLimiter } from './dashboard-locate.js';
 import { dashboardEventBus } from './dashboard-events.js';
 import { expandHome } from './session-manager.js';
@@ -108,6 +110,63 @@ ipcRoute('GET', '/api/sessions/:sessionId', (_req, res, params) => {
 ipcRoute('POST', '/api/sessions/:sessionId/close', async (_req, res, params) => {
   const r = await closeSession(params.sessionId);
   jsonRes(res, 200, r);
+});
+
+/**
+ * Reactivate a closed session — counterpart to `/close`. Used by both the
+ * "▶️ 恢复会话" card button (via card-handler) and the `botmux resume <id>`
+ * CLI command (via this HTTP route). The CLI route also drops a notice into
+ * the original Lark thread so users see why the session is alive again.
+ */
+ipcRoute('POST', '/api/sessions/:sessionId/resume', async (_req, res, params) => {
+  const sessionId = params.sessionId;
+  const reg = getActiveSessionsRegistry();
+  if (!reg) return jsonRes(res, 503, { ok: false, error: 'registry_unavailable' });
+  const result = resumeSession(sessionId, reg);
+  if (!result.ok) {
+    const status = result.error === 'not_found' ? 404 : 409;
+    return jsonRes(res, status, { ok: false, error: result.error, activeSessionId: result.activeSessionId });
+  }
+
+  const ds = result.ds;
+  // Tell the dashboard the row flipped back to active (mirror of session.update
+  // emitted by closeSession). Use `null` for closedAt — `undefined` would be
+  // dropped by JSON.stringify on the SSE wire and the aggregator's spread
+  // (`{...cur, ...patch}`) would leave the stale closedAt in place.
+  dashboardEventBus.publish({
+    type: 'session.update',
+    body: {
+      sessionId,
+      patch: { status: 'active', closedAt: null },
+    },
+  });
+
+  // Notify the original chat so humans see why the session is alive again.
+  // Routing follows session.scope — thread-scope replies into the thread root
+  // (reply_in_thread=true), chat-scope posts a plain message to the chat (any
+  // reply_in_thread call would silently get rejected or land on a stale root).
+  const cliId = ds.session.cliId;
+  const cliName = getCliDisplayName(cliId ?? 'claude-code');
+  const notice = JSON.stringify({ text: `🔄 会话已通过命令行恢复，发条消息继续与 ${cliName} 对话。` });
+  if (ds.larkAppId) {
+    if (ds.scope === 'chat' && ds.chatId) {
+      sendMessage(ds.larkAppId, ds.chatId, notice, 'text')
+        .catch(err => logger.debug(`[resume] failed to post chat-scope resume notice: ${err}`));
+    } else if (ds.session.rootMessageId) {
+      replyMessage(ds.larkAppId, ds.session.rootMessageId, notice, 'text', true)
+        .catch(err => logger.debug(`[resume] failed to post thread-scope resume notice: ${err}`));
+    }
+  }
+
+  jsonRes(res, 200, {
+    ok: true,
+    sessionId,
+    title: ds.session.title,
+    chatId: ds.chatId,
+    rootMessageId: ds.session.rootMessageId,
+    workingDir: ds.session.workingDir,
+    cliId,
+  });
 });
 
 ipcRoute('POST', '/api/sessions/:sessionId/locate', async (_req, res, params) => {

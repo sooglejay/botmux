@@ -10,7 +10,7 @@ import * as sessionStore from '../services/session-store.js';
 import * as scheduleStore from '../services/schedule-store.js';
 import * as scheduler from './scheduler.js';
 import { scanProjects, scanMultipleProjects } from '../services/project-scanner.js';
-import { buildRepoSelectCard, buildAdoptSelectCard, getCliDisplayName } from '../im/lark/card-builder.js';
+import { buildRepoSelectCard, buildAdoptSelectCard, buildSessionClosedCard, getCliDisplayName } from '../im/lark/card-builder.js';
 import { deleteMessage } from '../im/lark/client.js';
 import { logger } from '../utils/logger.js';
 import { killWorker, forkWorker, forkAdoptWorker, getCurrentCliVersion } from './worker-pool.js';
@@ -274,11 +274,22 @@ export async function handleCommand(
     switch (cmd) {
       case '/close': {
         if (ds) {
+          const closedSessionId = ds.session.sessionId;
+          const closedTitle = ds.session.title;
+          const closedCliId = ds.session.cliId ?? getBot(ds.larkAppId).config.cliId;
+          const closedAnchor = sessionAnchorId(ds);
+          const closedWorkingDir = ds.session.workingDir;
           killWorker(ds);
-          sessionStore.closeSession(ds.session.sessionId);
+          sessionStore.closeSession(closedSessionId);
           activeSessions.delete(sessionKey(rootId, larkAppId!));
-          const cliName = getCliDisplayName(getBot(ds.larkAppId).config.cliId);
-          await sessionReply(rootId, `会话已关闭，${cliName} 进程已终止。`);
+          const card = buildSessionClosedCard(
+            closedSessionId,
+            closedAnchor,
+            closedTitle,
+            closedCliId,
+            closedWorkingDir,
+          );
+          await sessionReply(rootId, card, 'interactive');
           logger.info(`[${t}] Session closed by /close command`);
         } else {
           await sessionReply(rootId, '当前话题没有活跃的会话。');

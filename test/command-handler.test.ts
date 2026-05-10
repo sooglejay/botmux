@@ -90,6 +90,11 @@ vi.mock('../src/services/project-scanner.js', () => ({
 
 vi.mock('../src/im/lark/card-builder.js', () => ({
   buildRepoSelectCard: vi.fn(() => '{"card":"json"}'),
+  buildAdoptSelectCard: vi.fn(() => '{"card":"adopt-select"}'),
+  buildSessionClosedCard: vi.fn(
+    (sid: string) =>
+      `{"header":{"title":{"content":"🛑 会话已关闭"}},"action":"resume","cmd":"botmux resume ${sid.substring(0, 12)}"}`,
+  ),
   getCliDisplayName: vi.fn((id: string) => {
     const names: Record<string, string> = {
       'claude-code': 'Claude',
@@ -358,12 +363,19 @@ describe('handleCommand', () => {
       expect(killWorker).toHaveBeenCalledWith(ds);
       expect(sessionStore.closeSession).toHaveBeenCalledWith('sess-001');
       expect(deps.activeSessions.has(sessionKey(ROOT_ID, LARK_APP_ID))).toBe(false);
+      // /close now replies with an interactive card carrying a Resume button
+      // and a copyable `botmux resume <id>` command — assert on the card shape
+      // rather than the legacy plain text.
       expect(deps.sessionReply).toHaveBeenCalledWith(
         ROOT_ID,
         expect.stringContaining('会话已关闭'),
-        undefined,
+        'interactive',
         LARK_APP_ID,
       );
+      const replyArgs = (deps.sessionReply as any).mock.calls[0];
+      const cardJson = replyArgs[1] as string;
+      expect(cardJson).toContain('botmux resume');
+      expect(cardJson).toContain('"action":"resume"');
     });
 
     it('should reply with no-session message when session does not exist', async () => {

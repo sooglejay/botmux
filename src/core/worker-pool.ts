@@ -78,6 +78,13 @@ export function findActiveBySessionId(sessionId: string): DaemonSession | undefi
   return undefined;
 }
 
+/** Direct access to the active-sessions Map. Reserved for callers that need
+ *  to mutate (e.g. resumeSession reactivating a closed record); read-only
+ *  callers should prefer listActiveSessions / findActiveBySessionId. */
+export function getActiveSessionsRegistry(): Map<string, DaemonSession> | undefined {
+  return activeSessionsRegistry;
+}
+
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 function tag(ds: DaemonSession): string {

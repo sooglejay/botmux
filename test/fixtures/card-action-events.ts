@@ -23,6 +23,13 @@ export function makeCloseEvent(rootId: string, operatorOpenId = 'ou_user') {
   };
 }
 
+export function makeResumeEvent(rootId: string, sessionId: string, operatorOpenId = 'ou_user') {
+  return {
+    action: { value: { action: 'resume', root_id: rootId, session_id: sessionId } },
+    operator: { open_id: operatorOpenId },
+  };
+}
+
 export function makeGetWriteLinkEvent(rootId: string, operatorOpenId = 'ou_user') {
   return {
     action: { value: { action: 'get_write_link', root_id: rootId } },

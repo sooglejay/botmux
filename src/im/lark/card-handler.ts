@@ -8,12 +8,12 @@ import { config } from '../../config.js';
 import { getBot, getAllBots } from '../../bot-registry.js';
 import { canOperate } from './event-dispatcher.js';
 import { sendUserMessage, updateMessage, deleteMessage } from './client.js';
-import { buildSessionCard, buildStreamingCard, buildTuiPromptCard, buildTuiPromptProcessingCard, buildTuiPromptResolvedCard, getCliDisplayName, truncateContent } from './card-builder.js';
+import { buildSessionCard, buildStreamingCard, buildTuiPromptCard, buildTuiPromptProcessingCard, buildTuiPromptResolvedCard, buildSessionClosedCard, getCliDisplayName, truncateContent } from './card-builder.js';
 import { logger } from '../../utils/logger.js';
 import * as sessionStore from '../../services/session-store.js';
 import { loadFrozenCards, saveFrozenCards } from '../../services/frozen-card-store.js';
 import { forkWorker, killWorker, scheduleCardPatch, parkStreamCard } from '../../core/worker-pool.js';
-import { getSessionWorkingDir, buildNewTopicPrompt, getAvailableBots, persistStreamCardState } from '../../core/session-manager.js';
+import { getSessionWorkingDir, buildNewTopicPrompt, getAvailableBots, persistStreamCardState, resumeSession } from '../../core/session-manager.js';
 import type { DaemonToWorker, DisplayMode, TermActionKey } from '../../types.js';
 import { sessionKey, sessionAnchorId, frozenDisplayMode } from '../../core/types.js';
 import type { DaemonSession } from '../../core/types.js';
@@ -58,7 +58,7 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
   // Use the receiving bot's allowedUsers — the operator open_id in card actions
   // is scoped to the app that received the callback.
   const operatorOpenId = data?.operator?.open_id;
-  const isSensitive = value?.action && ['restart', 'close', 'skip_repo', 'get_write_link', 'toggle_stream', 'toggle_display', 'export_text', 'term_action', 'refresh_screenshot', 'takeover', 'disconnect', 'tui_keys', 'tui_text_input'].includes(value.action);
+  const isSensitive = value?.action && ['restart', 'close', 'resume', 'skip_repo', 'get_write_link', 'toggle_stream', 'toggle_display', 'export_text', 'term_action', 'refresh_screenshot', 'takeover', 'disconnect', 'tui_keys', 'tui_text_input'].includes(value.action);
   if (isSensitive) {
     const rootId = value?.root_id;
     // activeSessions is keyed by sessionKey(anchor, larkAppId) — `${anchor}::${larkAppId}`
@@ -72,8 +72,13 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
           ? activeSessions.get(sessionKey(rootId, larkAppId)) ?? activeSessions.get(rootId)
           : activeSessions.get(rootId))
       : undefined;
-    const effectiveAppId = larkAppId ?? ds?.larkAppId;
-    const chatId = ds?.chatId;
+    // Resume targets a closed session — fall back to the persistent store so
+    // we can still pin chatId/larkAppId for the canOperate gate.
+    const closedForCtx = !ds && value?.action === 'resume' && value?.session_id
+      ? sessionStore.getSession(value.session_id)
+      : undefined;
+    const effectiveAppId = larkAppId ?? ds?.larkAppId ?? closedForCtx?.larkAppId;
+    const chatId = ds?.chatId ?? closedForCtx?.chatId;
     if (effectiveAppId) {
       if (!canOperate(effectiveAppId, chatId, operatorOpenId)) {
         logger.info(`Card action "${value.action}" blocked for non-operator user: ${operatorOpenId} (chat=${chatId})`);
@@ -126,11 +131,46 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
     }
 
     if (actionType === 'close' && ds) {
+      const closedSessionId = ds.session.sessionId;
+      const closedTitle = ds.session.title;
+      const closedCliId = ds.session.cliId ?? getBot(ds.larkAppId).config.cliId;
+      const closedAnchor = sessionAnchorId(ds);
+      const closedWorkingDir = ds.session.workingDir;
       killWorker(ds);
-      sessionStore.closeSession(ds.session.sessionId);
+      sessionStore.closeSession(closedSessionId);
       activeSessions.delete(sKey);
-      await sessionReply(rootId, '✅ 会话已关闭');
+      const card = buildSessionClosedCard(
+        closedSessionId,
+        closedAnchor,
+        closedTitle,
+        closedCliId,
+        closedWorkingDir,
+      );
+      await sessionReply(rootId, card, 'interactive');
       logger.info(`[${tag(ds)}] Closed via card button`);
+    }
+
+    if (actionType === 'resume') {
+      const targetSessionId = value?.session_id;
+      if (!targetSessionId) {
+        await sessionReply(rootId, '⚠️ 缺少 session_id，无法恢复。');
+      } else {
+        const result = resumeSession(targetSessionId, activeSessions);
+        if (result.ok) {
+          const cliName = getCliDisplayName(result.ds.session.cliId ?? getBot(result.ds.larkAppId).config.cliId);
+          await sessionReply(rootId, `✅ 会话已恢复，发条消息继续与 ${cliName} 对话。`);
+          logger.info(`[${targetSessionId.substring(0, 8)}] Resumed via card button`);
+        } else if (result.error === 'not_found') {
+          await sessionReply(rootId, `⚠️ 找不到会话 ${targetSessionId.substring(0, 8)}，可能已被清理。`);
+        } else if (result.error === 'not_closed') {
+          await sessionReply(rootId, '会话已是活跃状态，无需恢复。');
+        } else if (result.error === 'anchor_occupied') {
+          const occ = result.activeSessionId ? `（占用者：${result.activeSessionId.substring(0, 8)}）` : '';
+          await sessionReply(rootId, `⚠️ 当前话题已有新会话${occ}，无法恢复旧会话。`);
+        } else if (result.error === 'adopt_unsupported') {
+          await sessionReply(rootId, '⚠️ adopt 接管会话不支持 resume。');
+        }
+      }
     }
 
     if (actionType === 'disconnect' && ds) {

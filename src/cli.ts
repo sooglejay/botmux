@@ -1306,6 +1306,130 @@ function cmdDelete(): void {
   console.log(`\n已关闭 ${toDelete.length} 个会话`);
 }
 
+/**
+ * Discover online daemons. Mirrors the staleness rule used by
+ * dashboard/registry.ts (90s heartbeat) so we don't try to talk to a daemon
+ * that's been dead but left a stale descriptor behind. Uses resolveDataDir()
+ * so SESSION_DATA_DIR / breadcrumb-overridden deployments find the right
+ * descriptor directory.
+ */
+function listOnlineDaemons(): Array<{ ipcPort: number; larkAppId: string; lastHeartbeat?: number }> {
+  const regDir = join(resolveDataDir(), 'dashboard-daemons');
+  if (!existsSync(regDir)) return [];
+  const STALE_MS = 90_000;
+  const now = Date.now();
+  const all: Array<{ ipcPort: number; larkAppId: string; lastHeartbeat?: number }> = [];
+  let names: string[] = [];
+  try { names = readdirSync(regDir); } catch { return []; }
+  for (const f of names) {
+    if (!f.endsWith('.json')) continue;
+    try {
+      const d = JSON.parse(readFileSync(join(regDir, f), 'utf-8'));
+      if (typeof d?.ipcPort !== 'number' || typeof d?.larkAppId !== 'string') continue;
+      if (now - (d.lastHeartbeat ?? 0) > STALE_MS) continue;
+      all.push({ ipcPort: d.ipcPort, larkAppId: d.larkAppId, lastHeartbeat: d.lastHeartbeat });
+    } catch { /* skip malformed */ }
+  }
+  return all;
+}
+
+function findDaemon(larkAppId?: string): { ipcPort: number; larkAppId: string } | null {
+  const all = listOnlineDaemons();
+  if (larkAppId) return all.find(d => d.larkAppId === larkAppId) ?? null;
+  return all[0] ?? null;
+}
+
+async function cmdResume(): Promise<void> {
+  const target = process.argv[3];
+  if (!target) {
+    console.error('用法: botmux resume <session-id|prefix>');
+    console.error('  通过 botmux list 查看活跃会话；resume 仅适用于 status=closed 的会话');
+    process.exit(1);
+  }
+
+  const sessions = loadSessions();
+  const closed = [...sessions.values()].filter(s => s.status === 'closed');
+  if (closed.length === 0) {
+    console.error('没有已关闭的会话可恢复。');
+    process.exit(1);
+  }
+  const matches = closed.filter(s => s.sessionId.startsWith(target));
+  if (matches.length === 0) {
+    console.error(`❌ 未找到匹配 "${target}" 的已关闭会话`);
+    process.exit(1);
+  }
+  if (matches.length > 1) {
+    console.error(`❌ "${target}" 匹配了 ${matches.length} 个会话，请提供更长的 ID 前缀：`);
+    for (const s of matches) {
+      console.error(`   ${s.sessionId.substring(0, 12)}  ${s.title}`);
+    }
+    process.exit(1);
+  }
+  const session = matches[0];
+
+  // Legacy sessions persisted before per-bot files lack larkAppId. Rather
+  // than silently routing to "the first online daemon" — which can land on
+  // the wrong bot in multi-bot setups and corrupt state — refuse and tell
+  // the user what's missing. Single-bot setups still work (we resolve to
+  // that lone daemon below).
+  if (!session.larkAppId) {
+    const online = listOnlineDaemons();
+    if (online.length > 1) {
+      console.error(`❌ 会话 ${session.sessionId.substring(0, 12)} 缺少 larkAppId，多 bot 部署下无法判定归属。`);
+      console.error('   解决办法：手动给该 session 补 larkAppId 后重试，或使用对应 bot 的话题里 ▶️ 恢复会话 按钮。');
+      console.error(`   在线 daemon (${online.length}): ${online.map(d => d.larkAppId).join(', ')}`);
+      process.exit(1);
+    }
+    if (online.length === 0) {
+      console.error('❌ 没有在线 daemon。请先：botmux start');
+      process.exit(1);
+    }
+    // Single online daemon — safe to use
+  }
+
+  const daemon = findDaemon(session.larkAppId);
+  if (!daemon) {
+    const hint = session.larkAppId
+      ? `未找到 daemon (larkAppId=${session.larkAppId})`
+      : '未找到任何在线 daemon';
+    console.error(`❌ ${hint}。请确认 daemon 正在运行：botmux status`);
+    process.exit(1);
+  }
+
+  let res: Response;
+  try {
+    res = await fetch(
+      `http://127.0.0.1:${daemon.ipcPort}/api/sessions/${encodeURIComponent(session.sessionId)}/resume`,
+      { method: 'POST' },
+    );
+  } catch (err: any) {
+    console.error(`❌ 无法连接到 daemon (port=${daemon.ipcPort}): ${err?.message ?? err}`);
+    process.exit(1);
+  }
+  let body: any = {};
+  try { body = await res.json(); } catch { /* */ }
+  if (res.ok && body?.ok) {
+    console.log(`✅ 会话已恢复: ${session.sessionId.substring(0, 12)}  ${session.title}`);
+    if (body.workingDir) console.log(`   工作目录: ${body.workingDir}`);
+    console.log('   下一条消息会以 --resume 拉起 CLI；已在原话题留通知。');
+    return;
+  }
+  const errCode = body?.error ?? `HTTP ${res.status}`;
+  if (errCode === 'anchor_occupied') {
+    const occ = body?.activeSessionId ? ` (占用者: ${body.activeSessionId.substring(0, 12)})` : '';
+    console.error(`❌ 当前话题已有新的活跃会话${occ}，无法 resume 旧会话。`);
+  } else if (errCode === 'not_closed') {
+    console.error('❌ 会话当前不是 closed 状态，无需 resume。');
+  } else if (errCode === 'not_found') {
+    console.error('❌ daemon 中找不到该会话（可能已被清理）。');
+  } else if (errCode === 'adopt_unsupported') {
+    console.error('❌ adopt 接管会话不支持 resume。');
+  } else {
+    console.error(`❌ 恢复失败: ${errCode}`);
+  }
+  process.exit(1);
+}
+
 function showHelp(): void {
   console.log(`
 botmux v${getVersion()} — IM ↔ AI 编程 CLI 桥接
@@ -1324,6 +1448,8 @@ botmux v${getVersion()} — IM ↔ AI 编程 CLI 桥接
   delete <id>      关闭指定会话（支持 ID 前缀匹配）
   delete all       关闭所有活跃会话
   delete stopped   清理所有进程已退出的僵尸会话
+  resume <id>      恢复一个已关闭的会话（支持 ID 前缀匹配）— 会话标记回 active，
+                   下条消息会以 --resume 重新拉起 CLI 进程
   autostart enable     注册开机自启（macOS launchd / Linux user systemd，无需 sudo）
   autostart disable    注销开机自启
   autostart status     查看自启状态
@@ -2159,6 +2285,7 @@ switch (command) {
   case 'delete':
   case 'del':
   case 'rm':      cmdDelete(); break;
+  case 'resume':  await cmdResume(); break;
   case 'schedule': await cmdSchedule(process.argv[3] ?? '', process.argv.slice(4)); break;
   case 'send':     await cmdSend(process.argv.slice(3)); break;
   case 'bots':     await cmdBots(process.argv[3] ?? 'list', process.argv.slice(4)); break;

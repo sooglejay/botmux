@@ -99,6 +99,54 @@ export function buildSessionCard(
 }
 
 /**
+ * Build the "session closed" card shown after `/close` (or the close button).
+ * Surfaces a Resume button + a copyable `botmux resume <id>` command so the
+ * user has an obvious path back instead of just a dead-end status text.
+ *
+ * `resumeShortId` is rendered as a 12-char prefix — long enough to be unique
+ * across a user's sessions but still nice to retype/paste.
+ */
+export function buildSessionClosedCard(
+  sessionId: string,
+  rootId: string,
+  title: string,
+  cliId?: CliId,
+  workingDir?: string,
+): string {
+  const cliName = getCliDisplayName(cliId ?? 'claude-code');
+  const shortId = sessionId.substring(0, 12);
+  const resumeCmd = `botmux resume ${shortId}`;
+  const dirLine = workingDir ? `\n📁 工作目录：\`${escapeMd(workingDir)}\`` : '';
+  const body =
+    `**${escapeMd(title || cliName)}**\n` +
+    `${cliName} 进程已终止。点击「恢复会话」继续，或在终端执行：\n` +
+    `\`\`\`\n${resumeCmd}\n\`\`\`` +
+    dirLine;
+  const card = {
+    config: { wide_screen_mode: true },
+    header: {
+      title: { tag: 'plain_text', content: '🛑 会话已关闭' },
+      template: 'grey',
+    },
+    elements: [
+      { tag: 'markdown', content: body },
+      {
+        tag: 'action',
+        actions: [
+          {
+            tag: 'button',
+            text: { tag: 'plain_text', content: '▶️ 恢复会话' },
+            type: 'primary',
+            value: { action: 'resume', root_id: rootId, session_id: sessionId },
+          },
+        ],
+      },
+    ],
+  };
+  return JSON.stringify(card);
+}
+
+/**
  * Feishu card API rejects payloads exceeding ~109 KB (error 230025).
  * Cap markdown content byte size with headroom for card JSON overhead.
  */

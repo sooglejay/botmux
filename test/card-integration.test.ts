@@ -24,6 +24,7 @@ import {
   makeToggleEvent,
   makeRestartEvent,
   makeCloseEvent,
+  makeResumeEvent,
   makeGetWriteLinkEvent,
 } from './fixtures/card-action-events.js';
 
@@ -79,6 +80,14 @@ vi.mock('../src/im/lark/card-builder.js', () => ({
     ) =>
       JSON.stringify({ type: 'session', url: _url, showManageButtons: !!showManageButtons, adoptMode: !!adoptMode }),
   ),
+  buildSessionClosedCard: vi.fn(
+    (sid: string, rid: string, title: string, cliId?: string, workingDir?: string) =>
+      JSON.stringify({ type: 'closed', sid, rid, title, cliId, workingDir }),
+  ),
+  buildTuiPromptCard: vi.fn(() => JSON.stringify({ type: 'tui-prompt' })),
+  buildTuiPromptProcessingCard: vi.fn(() => JSON.stringify({ type: 'tui-processing' })),
+  buildTuiPromptResolvedCard: vi.fn(() => JSON.stringify({ type: 'tui-resolved' })),
+  truncateContent: vi.fn((s: string) => s),
   getCliDisplayName: vi.fn(() => 'Claude'),
 }));
 
@@ -104,6 +113,10 @@ vi.mock('../src/services/session-store.js', () => ({
   closeSession: vi.fn(),
   updateSession: vi.fn(),
   createSession: vi.fn(),
+  // Resume action's permission gate falls back to a store lookup when the
+  // session is no longer in activeSessions. Tests override the implementation
+  // per-scenario via vi.mocked(getSession).mockReturnValueOnce(...).
+  getSession: vi.fn(),
 }));
 
 vi.mock('../src/core/worker-pool.js', async (importOriginal) => {
@@ -125,6 +138,8 @@ vi.mock('../src/core/session-manager.js', () => ({
   persistStreamCardState: vi.fn(),
   buildBridgeInputContent: vi.fn((s: string) => s),
   buildFollowUpContent: vi.fn((s: string) => s),
+  // Resume action delegates to session-manager — tests stub per-scenario.
+  resumeSession: vi.fn(),
 }));
 
 vi.mock('@larksuiteoapi/node-sdk', () => ({
@@ -443,12 +458,103 @@ describe('Card integration: full event flow', () => {
 
       expect(killWorker).toHaveBeenCalledWith(ds);
       expect(sessions.has(sKey)).toBe(false);
+      // Closed reply is now an interactive card with a Resume button; the
+      // mocked builder embeds the type marker so we assert on that shape.
       expect(deps.sessionReply).toHaveBeenCalledWith(
         ROOT_ID,
-        expect.stringContaining('关闭'),
+        expect.stringContaining('"type":"closed"'),
+        'interactive',
+        APP_ID,
+      );
+    });
+
+    it('resume should call resumeSession and reply with success notice', async () => {
+      const sessionId = 'closed-uuid-1';
+      const sessions = new Map<string, DaemonSession>();
+      const deps = makeDeps(sessions);
+
+      // Permission gate: closed sessions aren't in activeSessions; the handler
+      // falls back to sessionStore.getSession() to pin chatId/larkAppId.
+      const sessionStoreMod = await import('../src/services/session-store.js');
+      vi.mocked(sessionStoreMod.getSession).mockReturnValue({
+        sessionId, chatId: 'oc_chat', rootMessageId: ROOT_ID,
+        title: 'closed', status: 'closed', createdAt: '2026-01-01T00:00:00.000Z',
+        larkAppId: APP_ID, scope: 'thread', cliId: 'claude-code',
+      } as any);
+
+      const sm = await import('../src/core/session-manager.js');
+      const fakeDs: any = {
+        session: { sessionId, cliId: 'claude-code' },
+        larkAppId: APP_ID,
+      };
+      vi.mocked(sm.resumeSession).mockReturnValue({ ok: true, ds: fakeDs } as any);
+
+      await handleCardAction(makeResumeEvent(ROOT_ID, sessionId), deps, APP_ID);
+
+      expect(sm.resumeSession).toHaveBeenCalledWith(sessionId, sessions);
+      expect(deps.sessionReply).toHaveBeenCalledWith(
+        ROOT_ID,
+        expect.stringContaining('已恢复'),
         undefined,
         APP_ID,
       );
+    });
+
+    it('resume should surface anchor_occupied error from resumeSession', async () => {
+      const sessionId = 'closed-uuid-2';
+      const sessions = new Map<string, DaemonSession>();
+      const deps = makeDeps(sessions);
+
+      const sessionStoreMod = await import('../src/services/session-store.js');
+      vi.mocked(sessionStoreMod.getSession).mockReturnValue({
+        sessionId, chatId: 'oc_chat', rootMessageId: ROOT_ID,
+        title: 'closed', status: 'closed', createdAt: '2026-01-01T00:00:00.000Z',
+        larkAppId: APP_ID, scope: 'thread',
+      } as any);
+
+      const sm = await import('../src/core/session-manager.js');
+      vi.mocked(sm.resumeSession).mockReturnValue(
+        { ok: false, error: 'anchor_occupied', activeSessionId: 'newer-session-uuid' } as any,
+      );
+
+      await handleCardAction(makeResumeEvent(ROOT_ID, sessionId), deps, APP_ID);
+
+      expect(deps.sessionReply).toHaveBeenCalledWith(
+        ROOT_ID,
+        expect.stringContaining('已有新会话'),
+        undefined,
+        APP_ID,
+      );
+    });
+
+    it('resume should reject when operator is not in allowedUsers', async () => {
+      // canOperate is gated through bot-registry.getBot(...).resolvedAllowedUsers
+      // — switch the mock to a bot with a non-empty allowlist that excludes the
+      // operator, then verify resumeSession was never called and no reply went out.
+      const botRegMod = await import('../src/bot-registry.js');
+      vi.mocked(botRegMod.getBot).mockReturnValueOnce({
+        config: { larkAppId: APP_ID, larkAppSecret: 'secret', cliId: 'claude-code' } as any,
+        resolvedAllowedUsers: ['ou_other_user'],
+        botOpenId: 'ou_bot',
+      } as any);
+
+      const sessionId = 'closed-uuid-3';
+      const sessions = new Map<string, DaemonSession>();
+      const deps = makeDeps(sessions);
+
+      const sessionStoreMod = await import('../src/services/session-store.js');
+      vi.mocked(sessionStoreMod.getSession).mockReturnValue({
+        sessionId, chatId: 'oc_chat', rootMessageId: ROOT_ID,
+        title: 'closed', status: 'closed', createdAt: '2026-01-01T00:00:00.000Z',
+        larkAppId: APP_ID, scope: 'thread',
+      } as any);
+
+      const sm = await import('../src/core/session-manager.js');
+
+      await handleCardAction(makeResumeEvent(ROOT_ID, sessionId, 'ou_outsider'), deps, APP_ID);
+
+      expect(sm.resumeSession).not.toHaveBeenCalled();
+      expect(deps.sessionReply).not.toHaveBeenCalled();
     });
   });
 

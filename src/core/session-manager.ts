@@ -509,6 +509,106 @@ export function restoreActiveSessions(activeSessions: Map<string, DaemonSession>
   logger.info(`Restored ${active.length} session(s)${config.daemon.backendType === 'tmux' ? '' : ', waiting for messages to resume'}`);
 }
 
+/**
+ * Reactivate a single closed session — used by the "▶️ 恢复会话" card button
+ * and the `botmux resume <id>` CLI command. Mirrors the per-session branch
+ * of `restoreActiveSessions` but operates on one record by id and without
+ * killing stale pids (the `/close` flow that produced this closed record
+ * already killed them).
+ *
+ * Returns `{ ok: true, ds }` on success; structured error otherwise so callers
+ * (HTTP IPC, card handler) can surface a precise message.
+ *
+ *   - 'not_found'        — sessionId doesn't exist in any session file
+ *   - 'not_closed'       — session is still active or in some other state
+ *   - 'anchor_occupied'  — another active session already owns this anchor
+ *                          (e.g. user kept typing after /close, auto-creating
+ *                          a fresh thread session); refuse rather than clobber
+ *   - 'adopt_unsupported' — adopt sessions are torn down by /close and have
+ *                          no resume semantics
+ */
+export function resumeSession(
+  sessionId: string,
+  activeSessions: Map<string, DaemonSession>,
+): { ok: true; ds: DaemonSession }
+| { ok: false; error: 'not_found' | 'not_closed' | 'anchor_occupied' | 'adopt_unsupported'; activeSessionId?: string } {
+  const session = sessionStore.getSession(sessionId);
+  if (!session) return { ok: false, error: 'not_found' };
+  if (session.status !== 'closed') return { ok: false, error: 'not_closed' };
+
+  // Adopt sessions don't survive /close — the user's tmux pane and original
+  // CLI pid have already moved on, and bringing the bridge back without a live
+  // pane is meaningless.
+  if (session.title?.startsWith('Adopt:') || session.adoptedFrom) {
+    return { ok: false, error: 'adopt_unsupported' };
+  }
+
+  const scope: 'thread' | 'chat' = session.scope === 'chat' ? 'chat' : 'thread';
+  const larkAppId = session.larkAppId ?? getAllBots()[0]?.config.larkAppId ?? '';
+  const anchor = scope === 'thread' ? session.rootMessageId : session.chatId;
+  const key = sessionKey(anchor, larkAppId);
+
+  const existing = activeSessions.get(key);
+  if (existing) {
+    return { ok: false, error: 'anchor_occupied', activeSessionId: existing.session.sessionId };
+  }
+
+  // Belt-and-suspenders: also scan persisted sessions for any *other* active
+  // session pinned to the same (larkAppId, scope, anchor). The in-memory Map
+  // is the authoritative routing source for a running daemon, but it's only
+  // hydrated for sessions that survived restoreActiveSessions. Cross-process
+  // and partial-load situations (e.g. another bot's daemon writes a session
+  // file but our Map hasn't caught up, or a closed session was orphaned by a
+  // crash that left a sibling session active in the same anchor) can leave a
+  // store-level conflict invisible to the Map check above. Refuse instead of
+  // overwriting the routing key.
+  const conflict = sessionStore.listSessions().find(s =>
+    s.sessionId !== sessionId
+    && s.status === 'active'
+    && (s.larkAppId ?? '') === larkAppId
+    && (s.scope === 'chat' ? 'chat' : 'thread') === scope
+    && (scope === 'thread' ? s.rootMessageId === anchor : s.chatId === anchor),
+  );
+  if (conflict) {
+    return { ok: false, error: 'anchor_occupied', activeSessionId: conflict.sessionId };
+  }
+
+  // Reactivate in store — clear closedAt so dashboard rows don't keep showing
+  // the stale close timestamp on the now-active session.
+  session.status = 'active';
+  session.closedAt = undefined;
+  session.lastMessageAt = new Date().toISOString();
+  sessionStore.updateSession(session);
+
+  const now = Date.now();
+  const ds: DaemonSession = {
+    session,
+    worker: null,
+    workerPort: null,
+    workerToken: null,
+    larkAppId,
+    chatId: session.chatId,
+    chatType: session.chatType ?? 'group',
+    scope,
+    spawnedAt: sessionCreatedAtMs(session),
+    cliVersion: getCurrentCliVersion(),
+    lastMessageAt: now,
+    hasHistory: true,    // resumed sessions carry CLI history (--resume on next fork)
+    workingDir: session.workingDir,
+    ownerOpenId: session.ownerOpenId,
+    streamCardId: session.streamCardId,
+    streamCardNonce: session.streamCardNonce,
+    displayMode: session.displayMode ?? (session.streamExpanded ? 'screenshot' : 'hidden'),
+    currentImageKey: session.currentImageKey,
+    currentTurnTitle: session.currentTurnTitle,
+  };
+
+  messageQueue.ensureQueue(anchor);
+  activeSessions.set(key, ds);
+  logger.info(`Resumed session ${sessionId.substring(0, 8)} (scope: ${scope}, anchor: ${anchor.substring(0, 12)})`);
+  return { ok: true, ds };
+}
+
 // ─── Scheduled task execution ────────────────────────────────────────────────
 
 export async function executeScheduledTask(
