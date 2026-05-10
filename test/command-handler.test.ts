@@ -138,7 +138,7 @@ vi.mock('../src/services/oncall-store.js', () => ({
 
 // ─── Imports (after mocks) ──────────────────────────────────────────────────
 
-import { DAEMON_COMMANDS, PASSTHROUGH_COMMANDS, handleCommand, parseSlashCommandInvocation } from '../src/core/command-handler.js';
+import { DAEMON_COMMANDS, PASSTHROUGH_COMMANDS, handleCommand, parseSlashCommandInvocation, parseForceTopicInvocation } from '../src/core/command-handler.js';
 import type { CommandHandlerDeps } from '../src/core/command-handler.js';
 import { sessionKey } from '../src/core/types.js';
 import type { DaemonSession } from '../src/core/types.js';
@@ -287,6 +287,57 @@ describe('parseSlashCommandInvocation', () => {
 
   it('ignores non-command text', () => {
     expect(parseSlashCommandInvocation('请解释 /adopt 怎么设计')).toBeNull();
+  });
+});
+
+describe('parseForceTopicInvocation', () => {
+  it('parses /t with prompt', () => {
+    expect(parseForceTopicInvocation('/t 帮我看看 X')).toEqual({ prompt: '帮我看看 X' });
+  });
+
+  it('parses /topic with prompt', () => {
+    expect(parseForceTopicInvocation('/topic 帮我看看 Y')).toEqual({ prompt: '帮我看看 Y' });
+  });
+
+  it('parses bare /t (no args) with empty prompt', () => {
+    expect(parseForceTopicInvocation('/t')).toEqual({ prompt: '' });
+  });
+
+  it('parses bare /topic (no args) with empty prompt', () => {
+    expect(parseForceTopicInvocation('/topic')).toEqual({ prompt: '' });
+  });
+
+  it('is case-insensitive on the command itself', () => {
+    expect(parseForceTopicInvocation('/T hello')).toEqual({ prompt: 'hello' });
+    expect(parseForceTopicInvocation('/Topic hello')).toEqual({ prompt: 'hello' });
+  });
+
+  it('preserves multiline prompt content verbatim after the prefix', () => {
+    const content = '/t line1\nline2\nline3';
+    expect(parseForceTopicInvocation(content)).toEqual({ prompt: 'line1\nline2\nline3' });
+  });
+
+  it('does not match similar prefixes', () => {
+    expect(parseForceTopicInvocation('/tea is good')).toBeNull();
+    expect(parseForceTopicInvocation('/talk to me')).toBeNull();
+    expect(parseForceTopicInvocation('/topical')).toBeNull();
+  });
+
+  it('only matches at the very start of content', () => {
+    expect(parseForceTopicInvocation('hello /t world')).toBeNull();
+    expect(parseForceTopicInvocation('  /t hello')).toEqual({ prompt: 'hello' }); // tolerate leading whitespace
+  });
+
+  it('returns null for non-slash text', () => {
+    expect(parseForceTopicInvocation('hello world')).toBeNull();
+    expect(parseForceTopicInvocation('')).toBeNull();
+  });
+
+  it('does not collide with parseSlashCommandInvocation outputs', () => {
+    // /close, /restart, /repo etc. must NOT be claimed as force-topic invocations.
+    expect(parseForceTopicInvocation('/close')).toBeNull();
+    expect(parseForceTopicInvocation('/restart')).toBeNull();
+    expect(parseForceTopicInvocation('/repo 1')).toBeNull();
   });
 });
 

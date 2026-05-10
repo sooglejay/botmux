@@ -39,8 +39,9 @@ import {
 } from './core/worker-pool.js';
 import { setBotName, setLarkAppId, startIpcServer } from './core/dashboard-ipc-server.js';
 import { saveFrozenCards, deleteFrozenCards } from './services/frozen-card-store.js';
-import { DAEMON_COMMANDS, PASSTHROUGH_COMMANDS, handleCommand, parseSlashCommandInvocation } from './core/command-handler.js';
+import { DAEMON_COMMANDS, PASSTHROUGH_COMMANDS, handleCommand, parseSlashCommandInvocation, parseForceTopicInvocation } from './core/command-handler.js';
 import type { CommandHandlerDeps } from './core/command-handler.js';
+import { findInheritablePeer } from './core/inherit-peer.js';
 import { isCallbackUrl, handleCallbackUrl } from './utils/user-token.js';
 import {
   getSessionWorkingDir,
@@ -259,52 +260,6 @@ function getActiveCount(): number {
   return count;
 }
 
-/**
- * Find a sibling session whose `workingDir` we can reuse to skip the repo card.
- *
- * Three layers, tried in order:
- *   1. Same-anchor cross-bot peer (thread → root, chat → chatId): another bot
- *      already pinned a workingDir at exactly this anchor, e.g. 同根 thread
- *      reply or 同群 chat-scope reply.
- *   2. New-thread-in-普通群 fallback: scope=thread + chatType=group + no
- *      same-anchor peer → look for any chat-scope session in the same chat,
- *      regardless of bot. Covers the user's "open a 话题 in 普通群 where
- *      chat-scope sessions already exist" flow — the new thread is a child
- *      context of the same chat, the workingDir is unambiguous, no need to
- *      bounce through repo selection.
- *   3. Otherwise: null (caller falls through to oncall pin or repo card).
- *
- * Same-bot is allowed in layer 2 only — the new thread anchors on a different
- * id than the chat-scope session, so there's no anchor conflict and inheriting
- * one's own pinned workingDir is the obvious default. Layer 1 keeps the
- * cross-bot filter so two daemons don't ping-pong each other's anchors.
- */
-function findInheritablePeer(opts: {
-  scope: 'thread' | 'chat';
-  anchor: string;
-  chatId: string;
-  chatType: 'group' | 'p2p';
-  selfAppId: string;
-}): { sessionId: string; larkAppId?: string; workingDir: string } | null {
-  const { scope, anchor, chatId, chatType, selfAppId } = opts;
-  const sameAnchorPeers = scope === 'thread'
-    ? sessionStore.findActiveSessionsByRoot(anchor)
-    : sessionStore.findActiveChatScopeSessionsByChat(chatId);
-  let peer = sameAnchorPeers.find(p => p.larkAppId !== selfAppId && !!p.workingDir);
-  if (peer && peer.workingDir) {
-    return { sessionId: peer.sessionId, larkAppId: peer.larkAppId, workingDir: peer.workingDir };
-  }
-  if (scope === 'thread' && chatType === 'group') {
-    const chatPeers = sessionStore.findActiveChatScopeSessionsByChat(chatId);
-    peer = chatPeers.find(p => !!p.workingDir);
-    if (peer && peer.workingDir) {
-      return { sessionId: peer.sessionId, larkAppId: peer.larkAppId, workingDir: peer.workingDir };
-    }
-  }
-  return null;
-}
-
-
 // Dependencies passed to command-handler
 const commandDeps: CommandHandlerDeps = {
   activeSessions,
@@ -323,7 +278,11 @@ const cardDeps: CardHandlerDeps = {
 // ─── Event handling ──────────────────────────────────────────────────────────
 
 async function handleNewTopic(data: any, ctx: RoutingContext): Promise<void> {
-  const { chatId, messageId, chatType, scope, anchor, larkAppId } = ctx;
+  const { chatId, messageId, chatType, larkAppId } = ctx;
+  // scope/anchor are mutable here: `/t` / `/topic` may flip a 普通群 chat-scope
+  // routing into thread-scope so the bot's first reply seeds a Lark thread.
+  let scope = ctx.scope;
+  let anchor = ctx.anchor;
   await resolveNonsupportMessage(data, larkAppId);
   const { parsed, resources } = parseEventMessage(data);
 
@@ -333,9 +292,29 @@ async function handleNewTopic(data: any, ctx: RoutingContext): Promise<void> {
     resources.push(...extraResources);
   }
 
-  const content = parsed.content.trim();
+  let content = parsed.content.trim();
   // Strip leading @<bot> mentions so "@bot /oncall bind" is recognized as a command.
-  const cmdContent = stripLeadingMentions(content, parsed.mentions);
+  let cmdContent = stripLeadingMentions(content, parsed.mentions);
+
+  // `/t` / `/topic` — force the bot to reply in a thread, even in 普通群.
+  // In 普通群 the inbound message is chat-scope by default; override to
+  // thread-scope anchored at the user's message_id so sessionReply() uses
+  // reply_in_thread=true and seeds a fresh Lark thread. In 话题群 / p2p
+  // (already thread-scope) it's just a prefix strip — no routing change.
+  // Empty prompt is allowed: the user can fill it in while the repo card is
+  // pending (pendingFollowUps in handleThreadReply picks up subsequent text).
+  const forceTopic = parseForceTopicInvocation(cmdContent);
+  if (forceTopic) {
+    if (scope === 'chat') {
+      scope = 'thread';
+      anchor = messageId;
+    }
+    content = forceTopic.prompt;
+    parsed.content = forceTopic.prompt;
+    cmdContent = forceTopic.prompt;
+    logger.info(`[/t] Force-topic invocation: prompt="${forceTopic.prompt.substring(0, 60)}" (scope=${scope}, anchor=${anchor.substring(0, 12)})`);
+  }
+
   const senderOpenId: string | undefined = data.sender?.sender_id?.open_id;
   const botCfg = getBot(larkAppId).config;
   logger.info(`New session: "${content.substring(0, 60)}" (scope=${scope}, anchor=${anchor.substring(0, 12)}, resources: ${resources.length}, active: ${getActiveCount()}, messageId: ${messageId}, chatId: ${chatId})`);
