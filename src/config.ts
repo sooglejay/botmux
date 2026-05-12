@@ -1,5 +1,5 @@
 import { networkInterfaces } from 'node:os';
-import { execSync } from 'node:child_process';
+import { probeTmuxFunctional } from './setup/ensure-tmux.js';
 
 /** Get the first non-loopback IPv4 address, fallback to localhost. */
 function getLocalIp(): string {
@@ -11,13 +11,16 @@ function getLocalIp(): string {
   return 'localhost';
 }
 
+/**
+ * Pick the session backend. tmux is preferred (enables /adopt + per-client
+ * Web terminal attach) but only if it can actually start a server. The old
+ * check was `tmux -V`, which passes on machines where tmux is installed but
+ * broken (perms / config / linkage) and leaves the worker spamming "error
+ * connecting to /tmp/tmux-UID/default" forever. The functional probe filters
+ * those out so we silently fall back to PTY.
+ */
 function detectDefaultBackend(): 'pty' | 'tmux' {
-  try {
-    execSync('tmux -V', { stdio: 'ignore' });
-    return 'tmux';
-  } catch {
-    return 'pty';
-  }
+  return probeTmuxFunctional().ok ? 'tmux' : 'pty';
 }
 
 export const config = {

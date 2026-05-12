@@ -51,6 +51,7 @@ import { PtyBackend } from './adapters/backend/pty-backend.js';
 import { TmuxBackend } from './adapters/backend/tmux-backend.js';
 import { TmuxPipeBackend } from './adapters/backend/tmux-pipe-backend.js';
 import type { SessionBackend } from './adapters/backend/types.js';
+import { tmuxEnv } from './setup/ensure-tmux.js';
 import { IdleDetector } from './utils/idle-detector.js';
 import { ScreenAnalyzer } from './utils/screen-analyzer.js';
 import { captureToPng } from './utils/screenshot-renderer.js';
@@ -2225,7 +2226,16 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
   }
 
   cliAdapter = createCliAdapterSync(cfg.cliId as any, cfg.cliPathOverride);
-  const useTmux = cfg.backendType === 'tmux';
+  // backendType=tmux trust-but-verify: an explicit per-bot config (or
+  // BACKEND_TYPE=tmux env override) bypasses config.ts's auto-detect, so
+  // the worker re-probes here. If tmux can't start a server we silently
+  // fall back to PTY rather than letting attach-session / new-session spam
+  // the daemon error log every poll cycle.
+  let useTmux = cfg.backendType === 'tmux';
+  if (useTmux && !TmuxBackend.isAvailable()) {
+    log('tmux backend requested but functional probe failed — falling back to PTY backend');
+    useTmux = false;
+  }
   isTmuxMode = useTmux;
   const tmuxBe = useTmux ? new TmuxBackend(TmuxBackend.sessionName(cfg.sessionId)) : null;
   backend = tmuxBe ?? new PtyBackend();
@@ -2461,6 +2471,7 @@ function startWebServer(host: string, preferredPort?: number): Promise<number> {
             name: 'xterm-256color',
             cols,
             rows,
+            env: tmuxEnv() as { [key: string]: string },
           });
           clientPtys.set(ws, cp);
 

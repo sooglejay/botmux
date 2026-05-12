@@ -20,10 +20,18 @@ export { botmuxFontDir } from './ensure-fonts.js';
 export async function ensureDependencies(): Promise<DependenciesReport> {
   const platform = detectPlatform();
 
-  // tmux first — it's the load-bearing dep. Throws on failure.
+  // tmux: nice-to-have (enables /adopt + multi-pane Web terminal). Daemon
+  // still works on PTY backend without it, so failure is a warning, not fatal.
   const tmux = await ensureTmux(platform);
-  if (!tmux.freshInstall) {
-    console.log(`✓ tmux ${tmux.version} (existing)`);
+  if (tmux.installed) {
+    if (!tmux.freshInstall) console.log(`✓ tmux ${tmux.version} (existing)`);
+  } else {
+    console.warn('');
+    console.warn('⚠️  tmux 不可用，已退回到 PTY backend');
+    console.warn(`    原因：${tmux.reason ?? '未知'}`);
+    if (tmux.manualCommand) console.warn(`    手动尝试：${tmux.manualCommand}`);
+    console.warn('    影响：/adopt（接管已有 CLI 会话）和多人 Web 终端不可用；常规对话不受影响。');
+    console.warn('');
   }
 
   // Fonts second — best-effort.

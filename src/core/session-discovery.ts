@@ -11,6 +11,7 @@ import { join } from 'node:path';
 import type { CliId } from '../adapters/cli/types.js';
 import { findCodexRolloutByPid } from '../services/codex-transcript.js';
 import { findCocoSessionByPid } from '../services/coco-transcript.js';
+import { tmuxEnv } from '../setup/ensure-tmux.js';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -138,7 +139,7 @@ function getPaneDimensions(tmuxTarget: string): { cols: number; rows: number } |
   try {
     const out = execSync(
       `tmux display -t ${shellescape(tmuxTarget)} -p '#{pane_width} #{pane_height}'`,
-      { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] },
+      { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], env: tmuxEnv() },
     ).trim();
     const [colsStr, rowsStr] = out.split(' ');
     const cols = Number(colsStr);
@@ -167,7 +168,7 @@ export function discoverAdoptableSessions(filterCliId?: CliId): AdoptableSession
   try {
     panesRaw = execSync(
       "tmux list-panes -a -F '#{session_name}:#{window_index}.#{pane_index} #{pane_pid}'",
-      { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] },
+      { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], env: tmuxEnv() },
     );
   } catch {
     // tmux not available or no server running
@@ -257,7 +258,7 @@ export function validateAdoptTarget(tmuxTarget: string, expectedPid: number): bo
   try {
     const out = execSync(
       `tmux display -t ${shellescape(tmuxTarget)} -p '#{pane_pid}'`,
-      { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] },
+      { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], env: tmuxEnv() },
     ).trim();
     panePid = Number(out);
     if (isNaN(panePid)) return false;

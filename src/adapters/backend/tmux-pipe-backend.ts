@@ -29,6 +29,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import type { SessionBackend, SpawnOpts } from './types.js';
+import { tmuxEnv } from '../../setup/ensure-tmux.js';
 
 function shellescape(s: string): string {
   // Single-quote-escape, replacing internal ' with '\''
@@ -109,7 +110,7 @@ export class TmuxPipeBackend implements SessionBackend {
     try {
       execSync(
         `tmux pipe-pane -O -t ${shellescape(this.paneTarget)} 'cat > ${shellescape(this.fifoPath)}'`,
-        { stdio: 'ignore', timeout: 5000 },
+        { stdio: 'ignore', timeout: 5000, env: tmuxEnv() },
       );
       this.pipeAttached = true;
     } catch (err: any) {
@@ -128,6 +129,7 @@ export class TmuxPipeBackend implements SessionBackend {
     execFileSync('tmux', ['send-keys', '-t', this.paneTarget, '-l', '--', text], {
       stdio: 'ignore',
       timeout: 5000,
+      env: tmuxEnv(),
     });
   }
 
@@ -136,6 +138,7 @@ export class TmuxPipeBackend implements SessionBackend {
     execFileSync('tmux', ['send-keys', '-t', this.paneTarget, ...keys], {
       stdio: 'ignore',
       timeout: 5000,
+      env: tmuxEnv(),
     });
   }
 
@@ -145,10 +148,12 @@ export class TmuxPipeBackend implements SessionBackend {
       input: text,
       stdio: ['pipe', 'ignore', 'ignore'],
       timeout: 5000,
+      env: tmuxEnv(),
     });
     execFileSync('tmux', ['paste-buffer', '-t', this.paneTarget, '-d'], {
       stdio: 'ignore',
       timeout: 5000,
+      env: tmuxEnv(),
     });
   }
 
@@ -157,6 +162,7 @@ export class TmuxPipeBackend implements SessionBackend {
     execFileSync('tmux', ['copy-mode', '-e', '-t', this.paneTarget], {
       stdio: 'ignore',
       timeout: 5000,
+      env: tmuxEnv(),
     });
   }
 
@@ -165,6 +171,7 @@ export class TmuxPipeBackend implements SessionBackend {
     execFileSync('tmux', ['send-keys', '-t', this.paneTarget, '-X', xCommand], {
       stdio: 'ignore',
       timeout: 5000,
+      env: tmuxEnv(),
     });
   }
 
@@ -191,7 +198,7 @@ export class TmuxPipeBackend implements SessionBackend {
     // turns it off for the target pane.
     if (this.pipeAttached) {
       try {
-        execSync(`tmux pipe-pane -t ${shellescape(this.paneTarget)}`, { stdio: 'ignore', timeout: 3000 });
+        execSync(`tmux pipe-pane -t ${shellescape(this.paneTarget)}`, { stdio: 'ignore', timeout: 3000, env: tmuxEnv() });
       } catch { /* pane may already be gone — benign */ }
       this.pipeAttached = false;
     }
@@ -212,7 +219,12 @@ export class TmuxPipeBackend implements SessionBackend {
     try {
       const out = execSync(
         `tmux display-message -p -t ${shellescape(this.paneTarget)} '#{pane_pid}'`,
-        { encoding: 'utf-8', timeout: 3000 },
+        // Explicit stdio: execSync's default leaks the child's stderr to the
+        // parent — when tmux server is unavailable this would spam
+        // "error connecting to /tmp/tmux-UID/default" into daemon-error.log
+        // every poll. Capture stderr in the result instead.
+        // tmuxEnv() also strips $TMUX so we don't target a dead parent server.
+        { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 3000, env: tmuxEnv() },
       ).trim();
       const pid = parseInt(out, 10);
       return pid > 0 ? pid : null;
@@ -246,7 +258,8 @@ export class TmuxPipeBackend implements SessionBackend {
       const altOn = this.isPaneInAltBuffer();
       const raw = execSync(
         `tmux capture-pane -e -p -t ${shellescape(this.paneTarget)} -S -`,
-        { encoding: 'utf-8', timeout: 5000, maxBuffer: 16 * 1024 * 1024 },
+        // Explicit stdio — see getChildPid for why default leaks tmux stderr.
+        { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 5000, maxBuffer: 16 * 1024 * 1024, env: tmuxEnv() },
       );
       const normalised = normaliseCaptureLineEndings(raw);
       if (altOn) {
@@ -271,7 +284,8 @@ export class TmuxPipeBackend implements SessionBackend {
     try {
       const out = execSync(
         `tmux display-message -p -t ${shellescape(this.paneTarget)} '#{alternate_on}'`,
-        { encoding: 'utf-8', timeout: 2000 },
+        // Explicit stdio — see getChildPid for why default leaks tmux stderr.
+        { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 2000, env: tmuxEnv() },
       ).trim();
       return out === '1';
     } catch {
@@ -287,6 +301,7 @@ export class TmuxPipeBackend implements SessionBackend {
       execSync(`tmux display-message -p -t ${shellescape(this.paneTarget)} ''`, {
         stdio: 'ignore',
         timeout: 2000,
+        env: tmuxEnv(),
       });
       return true;
     } catch {

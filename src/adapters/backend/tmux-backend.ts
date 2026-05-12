@@ -1,6 +1,7 @@
 import * as pty from 'node-pty';
 import { execSync, execFileSync } from 'node:child_process';
 import type { SessionBackend, SpawnOpts } from './types.js';
+import { probeTmuxFunctional, tmuxEnv } from '../../setup/ensure-tmux.js';
 
 /**
  * TmuxBackend — session backend using tmux for process persistence.
@@ -39,14 +40,13 @@ export class TmuxBackend implements SessionBackend {
 
   // ─── Static helpers ───────────────────────────────────────────────────────
 
-  /** Check if tmux binary is available on PATH. */
+  /**
+   * Check if tmux is usable — runs a functional probe (start + kill a
+   * disposable server), not just `tmux -V`. Same probe as config.ts so
+   * backend selection and runtime guard agree.
+   */
   static isAvailable(): boolean {
-    try {
-      execSync('tmux -V', { stdio: 'ignore' });
-      return true;
-    } catch {
-      return false;
-    }
+    return probeTmuxFunctional().ok;
   }
 
   /** Derive tmux session name from a session UUID. */
@@ -57,7 +57,7 @@ export class TmuxBackend implements SessionBackend {
   /** Check if a named tmux session exists. */
   static hasSession(name: string): boolean {
     try {
-      execSync(`tmux has-session -t ${shellescape(name)}`, { stdio: 'ignore' });
+      execSync(`tmux has-session -t ${shellescape(name)}`, { stdio: 'ignore', env: tmuxEnv() });
       return true;
     } catch {
       return false;
@@ -67,7 +67,7 @@ export class TmuxBackend implements SessionBackend {
   /** Kill a named tmux session (no-op if it doesn't exist). */
   static killSession(name: string): void {
     try {
-      execSync(`tmux kill-session -t ${shellescape(name)}`, { stdio: 'ignore' });
+      execSync(`tmux kill-session -t ${shellescape(name)}`, { stdio: 'ignore', env: tmuxEnv() });
     } catch { /* session doesn't exist */ }
   }
 
@@ -76,6 +76,7 @@ export class TmuxBackend implements SessionBackend {
     try {
       const out = execSync("tmux list-sessions -F '#{session_name}' 2>/dev/null", {
         encoding: 'utf-8',
+        env: tmuxEnv(),
       });
       return out.split('\n').filter(s => s.startsWith('bmx-'));
     } catch {
@@ -87,6 +88,13 @@ export class TmuxBackend implements SessionBackend {
 
   spawn(bin: string, args: string[], opts: SpawnOpts): void {
     this.reattaching = TmuxBackend.hasSession(this.sessionName);
+    // Strip TMUX/TMUX_PANE from caller env before handing to pty.spawn — if
+    // the daemon was started inside a tmux session, leaving TMUX set would
+    // make this `tmux attach-session`/`new-session` target that parent
+    // session's socket. After the user's terminal tmux dies, every call
+    // here would print `error connecting to <stale-socket>` to the PTY and
+    // flood the daemon log via the leaked-stderr path.
+    const childEnv = tmuxEnv(opts.env);
 
     if (this.reattaching) {
       // Re-attach to surviving tmux session (CLI is still running)
@@ -95,7 +103,7 @@ export class TmuxBackend implements SessionBackend {
         cols: opts.cols,
         rows: opts.rows,
         cwd: opts.cwd,
-        env: opts.env,
+        env: childEnv,
       });
     } else {
       // Build -e flags for env vars that the tmux session command needs.
@@ -123,7 +131,7 @@ export class TmuxBackend implements SessionBackend {
         cols: opts.cols,
         rows: opts.rows,
         cwd: opts.cwd,
-        env: opts.env,
+        env: childEnv,
       });
     }
 
@@ -134,17 +142,18 @@ export class TmuxBackend implements SessionBackend {
     setTimeout(() => {
       try {
         const t = shellescape(this.sessionName);
-        execSync(`tmux set-option -t ${t} status off`, { stdio: 'ignore' });
-        execSync(`tmux set-option -t ${t} mouse on`, { stdio: 'ignore' });
+        const env = tmuxEnv();
+        execSync(`tmux set-option -t ${t} status off`, { stdio: 'ignore', env });
+        execSync(`tmux set-option -t ${t} mouse on`, { stdio: 'ignore', env });
         // set-clipboard is a server option — enable OSC 52 passthrough for web copy
-        execSync(`tmux set-option -s set-clipboard on`, { stdio: 'ignore' });
-        execSync(`tmux set-option -t ${t} history-limit 50000`, { stdio: 'ignore' });
+        execSync(`tmux set-option -s set-clipboard on`, { stdio: 'ignore', env });
+        execSync(`tmux set-option -t ${t} history-limit 50000`, { stdio: 'ignore', env });
         // Prevent web terminal clients (smaller viewport) from shrinking the
         // tmux window.  If a web client at 80×24 causes tmux to resize the
         // window down, reflowed content shifts buffer positions and the
         // terminal renderer's baseline tracking breaks — historical output
         // leaks into the streaming card.
-        execSync(`tmux set-option -t ${t} window-size largest`, { stdio: 'ignore' });
+        execSync(`tmux set-option -t ${t} window-size largest`, { stdio: 'ignore', env });
       } catch { /* session may not be ready yet — benign */ }
     }, 500);
   }
@@ -177,6 +186,7 @@ export class TmuxBackend implements SessionBackend {
     execFileSync('tmux', ['send-keys', '-t', this.cmdTarget, '-l', '--', text], {
       stdio: 'ignore',
       timeout: 5000,
+      env: tmuxEnv(),
     });
   }
 
@@ -185,6 +195,7 @@ export class TmuxBackend implements SessionBackend {
     execFileSync('tmux', ['send-keys', '-t', this.cmdTarget, ...keys], {
       stdio: 'ignore',
       timeout: 5000,
+      env: tmuxEnv(),
     });
   }
 
@@ -197,6 +208,7 @@ export class TmuxBackend implements SessionBackend {
     execFileSync('tmux', ['copy-mode', '-e', '-t', this.cmdTarget], {
       stdio: 'ignore',
       timeout: 5000,
+      env: tmuxEnv(),
     });
   }
 
@@ -205,6 +217,7 @@ export class TmuxBackend implements SessionBackend {
     execFileSync('tmux', ['send-keys', '-t', this.cmdTarget, '-X', xCommand], {
       stdio: 'ignore',
       timeout: 5000,
+      env: tmuxEnv(),
     });
   }
 
@@ -218,10 +231,12 @@ export class TmuxBackend implements SessionBackend {
       input: text,
       stdio: ['pipe', 'ignore', 'ignore'],
       timeout: 5000,
+      env: tmuxEnv(),
     });
     execFileSync('tmux', ['paste-buffer', '-t', this.cmdTarget, '-d'], {
       stdio: 'ignore',
       timeout: 5000,
+      env: tmuxEnv(),
     });
   }
 
@@ -249,7 +264,13 @@ export class TmuxBackend implements SessionBackend {
       // would silently bind to whichever pane tmux happens to list first.
       const output = execSync(
         `tmux display-message -p -t ${shellescape(this.cmdTarget)} '#{pane_pid}'`,
-        { encoding: 'utf-8', timeout: 3000 },
+        // Explicit stdio: execSync's default leaks the child's stderr to the
+        // parent's stderr fd. When tmux server is unavailable (transient
+        // restart, killed by user, /tmp wiped), this command writes "error
+        // connecting to /tmp/tmux-UID/default" to stderr, which the daemon's
+        // worker.stderr handler then logs as a worker error every poll cycle.
+        // tmuxEnv() also strips $TMUX so we don't target a dead parent server.
+        { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 3000, env: tmuxEnv() },
       ).trim();
       const pid = parseInt(output, 10);
       return pid > 0 ? pid : null;
@@ -266,10 +287,10 @@ export class TmuxBackend implements SessionBackend {
         // Only unzoom if the pane is currently zoomed
         const zoomed = execSync(
           `tmux display -t ${shellescape(this.adoptedPaneTarget)} -p '#{window_zoomed_flag}'`,
-          { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] },
+          { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], env: tmuxEnv() },
         ).trim();
         if (zoomed === '1') {
-          execSync(`tmux resize-pane -Z -t ${shellescape(this.adoptedPaneTarget)}`, { stdio: 'ignore' });
+          execSync(`tmux resize-pane -Z -t ${shellescape(this.adoptedPaneTarget)}`, { stdio: 'ignore', env: tmuxEnv() });
         }
       } catch { /* pane may be gone — benign */ }
       this.adoptedPaneTarget = null;
@@ -313,7 +334,7 @@ export class TmuxBackend implements SessionBackend {
     // can be revisited later via `tmux pipe-pane` (out-of-band capture)
     // without polluting the -CC client.
     try {
-      execSync(`tmux resize-pane -Z -t ${shellescape(tmuxTarget)}`, { stdio: 'ignore' });
+      execSync(`tmux resize-pane -Z -t ${shellescape(tmuxTarget)}`, { stdio: 'ignore', env: tmuxEnv() });
     } catch { /* benign */ }
 
     this.process = pty.spawn('tmux', ['attach-session', '-t', tmuxTarget], {
@@ -321,7 +342,7 @@ export class TmuxBackend implements SessionBackend {
       cols: opts.cols,
       rows: opts.rows,
       cwd: opts.cwd,
-      env: opts.env,
+      env: tmuxEnv(opts.env),
     });
   }
 

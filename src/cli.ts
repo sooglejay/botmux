@@ -25,6 +25,7 @@ import { createInterface } from 'node:readline';
 import { createRequire } from 'node:module';
 import { createHmac, randomBytes } from 'node:crypto';
 import { enableAutostart, disableAutostart, autostartStatus, refreshAutostart } from './autostart.js';
+import { tmuxEnv } from './setup/ensure-tmux.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -505,17 +506,17 @@ async function cmdRestart(): Promise<void> {
   }
 }
 
-/** Wraps `ensureDependencies()` so the cmdStart/cmdRestart paths get a clean
- *  exit on tmux failure. Fonts failures are non-fatal and surface as warnings
- *  printed by ensureDependencies itself. */
+/** Wraps `ensureDependencies()`. Neither tmux nor fonts are load-bearing —
+ *  ensureDependencies surfaces failures as warnings and the daemon continues
+ *  on PTY backend. Only an unexpected exception (programmer error) propagates. */
 async function ensureSystemDependencies(): Promise<void> {
   const { ensureDependencies } = await import('./setup/index.js');
   try {
     await ensureDependencies();
   } catch (err: any) {
     console.error('');
-    console.error(err?.message ?? String(err));
-    process.exit(1);
+    console.error(`依赖检测内部错误: ${err?.message ?? String(err)}`);
+    // Don't exit — let daemon start try anyway; worst case PTY backend works.
   }
 }
 
@@ -939,7 +940,7 @@ function printSessionTable(active: SessionData[]): void {
 /** Check if a tmux session exists. */
 function tmuxSessionExists(name: string): boolean {
   try {
-    execSync(`tmux has-session -t ${name} 2>/dev/null`, { stdio: 'ignore' });
+    execSync(`tmux has-session -t ${name} 2>/dev/null`, { stdio: 'ignore', env: tmuxEnv() });
     return true;
   } catch {
     return false;
@@ -1109,7 +1110,7 @@ function interactiveSessionPicker(active: SessionData[]): Promise<void> {
 
       // Kill tmux session
       if (r.hasTmux) {
-        try { execSync(`tmux kill-session -t '${r.tmuxName}' 2>/dev/null`, { stdio: 'ignore' }); } catch { /* */ }
+        try { execSync(`tmux kill-session -t '${r.tmuxName}' 2>/dev/null`, { stdio: 'ignore', env: tmuxEnv() }); } catch { /* */ }
       }
 
       // Mark closed & persist
@@ -1186,6 +1187,7 @@ function interactiveSessionPicker(active: SessionData[]): Promise<void> {
         cleanup();
         spawnSync('tmux', ['attach-session', '-t', selected.tmuxName], {
           stdio: 'inherit',
+          env: tmuxEnv(),
         });
         resolve();
         return;
@@ -1293,7 +1295,7 @@ function cmdDelete(): void {
     // Kill associated tmux session if it exists
     const tmuxName = `bmx-${s.sessionId.substring(0, 8)}`;
     try {
-      execSync(`tmux kill-session -t '${tmuxName}' 2>/dev/null`, { stdio: 'ignore' });
+      execSync(`tmux kill-session -t '${tmuxName}' 2>/dev/null`, { stdio: 'ignore', env: tmuxEnv() });
       console.log(`  killed tmux ${tmuxName}`);
     } catch { /* no tmux session */ }
 
