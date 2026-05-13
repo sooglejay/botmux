@@ -1,133 +1,388 @@
 /**
- * Regression test: TmuxBackend must forward daemon `process.env` to the
- * spawned CLI via `tmux new-session -e KEY=VAL` flags.
+ * Tests for TmuxBackend's shell-wrapped CLI launch.
  *
- * Failure mode this guards against:
- *   - tmux's `new-session ... -- cmd` runs cmd with the tmux **server's**
- *     env (frozen at first-spawn time), not the env passed to pty.spawn.
- *   - Pre-fix, only a hand-picked allow-list (LARK_*, *_PROXY, IS_SANDBOX,
- *     SESSION_DATA_DIR, BOTMUX) was forwarded via `-e`, so PATH / NVM_BIN /
- *     PNPM_HOME / HOME / USER got dropped.
- *   - Any `#!/usr/bin/env node` CLI installed under nvm or pnpm (CoCo, Aiden,
- *     etc.) then exited code 1 immediately because the tmux session's PATH
- *     didn't see `node`.
+ * The design (see tmux-backend.ts spawn() else branch):
+ *   tmux new-session ... -- <shell> <shellFlags> -c <SCRIPT> _ <cwd> KEY=VAL... bin args...
+ *
+ * Goal: give the CLI an environment that matches "user opens a terminal and
+ * runs the CLI by hand" — PATH / NVM / PNPM / mise / etc. come from the
+ * user's rcfile loaded by the chosen shell, not from daemon process.env
+ * passthrough. The only env injected by botmux is the per-bot/per-session
+ * minimum (LARK creds, BOTMUX marker, SESSION_DATA_DIR, IS_SANDBOX, owner
+ * open_id), injected via `/usr/bin/env KEY=VAL` so the values land AFTER
+ * rcfile load and override any same-named exports the user happens to have.
+ *
+ * SCRIPT also `cd`s back to the requested cwd before exec, so a stray `cd`
+ * in the user's rcfile doesn't drag the CLI's working directory away.
  */
-import { describe, it, expect } from 'vitest';
-import { buildTmuxSessionEnvFlags } from '../src/adapters/backend/tmux-backend.js';
+import { describe, it, expect, afterEach } from 'vitest';
+import { existsSync, mkdtempSync, writeFileSync, chmodSync, rmSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import {
+  buildBotmuxEnvAssignments,
+  buildDebugKeepShellScript,
+  resolveUserShell,
+  SHELL_WRAPPER_SCRIPT,
+} from '../src/adapters/backend/tmux-backend.js';
 
-describe('buildTmuxSessionEnvFlags()', () => {
-  it('forwards every defined env entry as a -e KEY=VAL pair', () => {
-    const flags = buildTmuxSessionEnvFlags({
-      PATH: '/home/u/.nvm/versions/node/v20/bin:/usr/bin',
+describe('buildBotmuxEnvAssignments()', () => {
+  it('forwards only the daemon-side keys (user rcfile cannot derive these)', () => {
+    const out = buildBotmuxEnvAssignments({
+      LARK_APP_ID: 'cli_abc',
+      LARK_APP_SECRET: 'secret',
+      __OWNER_OPEN_ID: 'ou_x',
+      BOTMUX: '1',
+      SESSION_DATA_DIR: '/home/u/.botmux/data',
+      IS_SANDBOX: '1',
+      // None of the rest should appear — those come from rcfile.
+      PATH: '/usr/bin',
       HOME: '/home/u',
       NVM_BIN: '/home/u/.nvm/versions/node/v20/bin',
-      PNPM_HOME: '/home/u/.local/share/pnpm',
+      HTTP_PROXY: 'http://proxy:8080',
+      LANG: 'en_US.UTF-8',
     });
-    // -e PATH=... -e HOME=... -e NVM_BIN=... -e PNPM_HOME=...
-    expect(flags).toEqual([
-      '-e', 'PATH=/home/u/.nvm/versions/node/v20/bin:/usr/bin',
-      '-e', 'HOME=/home/u',
-      '-e', 'NVM_BIN=/home/u/.nvm/versions/node/v20/bin',
-      '-e', 'PNPM_HOME=/home/u/.local/share/pnpm',
+    expect(out).toEqual([
+      'LARK_APP_ID=cli_abc',
+      'LARK_APP_SECRET=secret',
+      '__OWNER_OPEN_ID=ou_x',
+      'BOTMUX=1',
+      'SESSION_DATA_DIR=/home/u/.botmux/data',
+      'IS_SANDBOX=1',
     ]);
   });
 
-  it('still forwards the previously-allowlisted vars (LARK_*, IS_SANDBOX, etc.)', () => {
-    const flags = buildTmuxSessionEnvFlags({
+  it('skips entries whose value is undefined (e.g. IS_SANDBOX outside root mode)', () => {
+    const out = buildBotmuxEnvAssignments({
       LARK_APP_ID: 'cli_abc',
       LARK_APP_SECRET: 'secret',
-      BOTMUX: '1',
-      __OWNER_OPEN_ID: 'ou_x',
-      SESSION_DATA_DIR: '/home/u/.botmux/data',
-      IS_SANDBOX: '1',
-      HTTP_PROXY: 'http://proxy:8080',
-      HTTPS_PROXY: 'http://proxy:8080',
-      http_proxy: 'http://proxy:8080',
-      NO_PROXY: 'localhost',
     });
-    const joined = flags.join(' ');
-    expect(joined).toContain('-e LARK_APP_ID=cli_abc');
-    expect(joined).toContain('-e LARK_APP_SECRET=secret');
-    expect(joined).toContain('-e BOTMUX=1');
-    expect(joined).toContain('-e __OWNER_OPEN_ID=ou_x');
-    expect(joined).toContain('-e SESSION_DATA_DIR=/home/u/.botmux/data');
-    expect(joined).toContain('-e IS_SANDBOX=1');
-    expect(joined).toContain('-e HTTP_PROXY=http://proxy:8080');
-    expect(joined).toContain('-e HTTPS_PROXY=http://proxy:8080');
-    expect(joined).toContain('-e http_proxy=http://proxy:8080');
-    expect(joined).toContain('-e NO_PROXY=localhost');
+    expect(out).toEqual(['LARK_APP_ID=cli_abc', 'LARK_APP_SECRET=secret']);
+    expect(out.every(s => !s.endsWith('=undefined'))).toBe(true);
   });
 
-  it('drops TMUX / TMUX_PANE so a stale parent socket address never reaches the child', () => {
-    const flags = buildTmuxSessionEnvFlags({
-      TMUX: '/tmp/tmux-99999/missing,12345,0',
-      TMUX_PANE: '%99',
-      PATH: '/usr/bin',
+  it('does NOT forward arbitrary env even when set (PATH, HTTP_PROXY, ...)', () => {
+    const out = buildBotmuxEnvAssignments({
+      PATH: '/should/not/leak',
+      HTTP_PROXY: 'http://should/not/leak',
+      LANG: 'should-not-leak',
+      LARK_APP_ID: 'kept',
     });
-    const joined = flags.join(' ');
-    expect(joined).not.toContain('TMUX=');
-    expect(joined).not.toContain('TMUX_PANE=');
-    expect(joined).toContain('-e PATH=/usr/bin');
+    expect(out).toEqual(['LARK_APP_ID=kept']);
   });
 
-  it('drops shell-local bookkeeping (_, OLDPWD, PWD, SHLVL)', () => {
-    const flags = buildTmuxSessionEnvFlags({
-      _: '/usr/bin/node',
-      OLDPWD: '/home/u',
-      PWD: '/home/u/work',
-      SHLVL: '2',
-      LANG: 'en_US.UTF-8',
+  it('preserves values with spaces, quotes, equals, newlines (argv array, no shell parsing)', () => {
+    const out = buildBotmuxEnvAssignments({
+      LARK_APP_ID: 'with space',
+      LARK_APP_SECRET: 'has=equals=in=value',
+      __OWNER_OPEN_ID: `it's "tricky"`,
+      BOTMUX: 'line1\nline2',
     });
-    const joined = flags.join(' ');
-    expect(joined).not.toMatch(/-e _=/);
-    expect(joined).not.toContain('OLDPWD=');
-    expect(joined).not.toContain('PWD=');
-    expect(joined).not.toContain('SHLVL=');
-    expect(joined).toContain('-e LANG=en_US.UTF-8');
+    expect(out).toContain('LARK_APP_ID=with space');
+    expect(out).toContain('LARK_APP_SECRET=has=equals=in=value');
+    expect(out).toContain(`__OWNER_OPEN_ID=it's "tricky"`);
+    expect(out).toContain('BOTMUX=line1\nline2');
   });
 
-  it('skips entries whose value is undefined', () => {
-    // worker.ts:2285 spreads { ...process.env, CLAUDECODE: undefined } — the
-    // explicit `undefined` should not produce a `-e CLAUDECODE=undefined`.
-    const flags = buildTmuxSessionEnvFlags({
-      PATH: '/usr/bin',
-      CLAUDECODE: undefined,
-    });
-    expect(flags).toEqual(['-e', 'PATH=/usr/bin']);
+  it('returns [] for undefined env (no spawn-opts env passed)', () => {
+    expect(buildBotmuxEnvAssignments(undefined)).toEqual([]);
   });
 
-  it('skips entries whose key is not a valid POSIX env-var name', () => {
-    // Defensive: a malformed parent env (e.g. a key containing `=`) must not
-    // be able to inject extra `-e` flags or desync the tmux argv. We just
-    // drop those entries entirely.
-    const flags = buildTmuxSessionEnvFlags({
-      'OK_NAME': '1',
-      '1BAD': 'starts-with-digit',
-      'BAD-KEY': 'contains-dash',
-      'BAD=KEY': 'contains-equals',
-      '': 'empty-key',
-    });
-    expect(flags).toEqual(['-e', 'OK_NAME=1']);
+  it('never emits massive argv even with a thousand-entry process.env (Codex check #4)', () => {
+    const huge: NodeJS.ProcessEnv = {};
+    for (let i = 0; i < 1000; i++) huge[`USER_VAR_${i}`] = 'x'.repeat(200);
+    huge.LARK_APP_ID = 'kept';
+    huge.BOTMUX = '1';
+    const out = buildBotmuxEnvAssignments(huge);
+    expect(out).toEqual(['LARK_APP_ID=kept', 'BOTMUX=1']);
+  });
+});
+
+describe('resolveUserShell()', () => {
+  let tmpDir: string | undefined;
+  afterEach(() => {
+    if (tmpDir) {
+      rmSync(tmpDir, { recursive: true, force: true });
+      tmpDir = undefined;
+    }
   });
 
-  it('handles undefined env arg (no spawn-opts env passed)', () => {
-    expect(buildTmuxSessionEnvFlags(undefined)).toEqual([]);
+  it('returns bash-flavoured spec (-i only, NO -l) when $SHELL is bash', () => {
+    // Codex Blocker 1: bash -l does NOT auto-source .bashrc. Many users only
+    // have nvm/fnm/pnpm hooks in .bashrc, so we use -i alone to ensure .bashrc
+    // loads regardless of whether their .bash_profile sources it.
+    tmpDir = mkdtempSync(join(tmpdir(), 'bmx-shell-'));
+    const fake = join(tmpDir, 'bash');
+    writeFileSync(fake, '#!/bin/sh\nexec "$@"\n');
+    chmodSync(fake, 0o755);
+    const spec = resolveUserShell({ SHELL: fake });
+    expect(spec.shell).toBe(fake);
+    expect(spec.flags).toEqual(['-i']);
+    expect(spec.flags).not.toContain('-l');
   });
 
-  it('preserves values containing spaces, quotes, and other special chars', () => {
-    // Each `-e KEY=VAL` lands in execve(2)'s argv directly — no shell, no
-    // escaping needed. The VAL string is passed through verbatim, and tmux
-    // splits on the first `=` to get key/value.
-    const flags = buildTmuxSessionEnvFlags({
-      WITH_SPACE: 'hello world',
-      WITH_QUOTE: `it's "tricky"`,
-      WITH_EQUALS: 'a=b=c',
-      WITH_NEWLINE: 'line1\nline2',
-    });
-    expect(flags).toContain('-e');
-    expect(flags).toContain('WITH_SPACE=hello world');
-    expect(flags).toContain(`WITH_QUOTE=it's "tricky"`);
-    expect(flags).toContain('WITH_EQUALS=a=b=c');
-    expect(flags).toContain('WITH_NEWLINE=line1\nline2');
+  it('returns zsh-flavoured spec (-l -i) when $SHELL is zsh', () => {
+    // zsh login reads .zprofile/.zlogin; interactive reads .zshrc. Need both.
+    tmpDir = mkdtempSync(join(tmpdir(), 'bmx-shell-'));
+    const fake = join(tmpDir, 'zsh');
+    writeFileSync(fake, '#!/bin/sh\nexec "$@"\n');
+    chmodSync(fake, 0o755);
+    const spec = resolveUserShell({ SHELL: fake });
+    expect(spec.shell).toBe(fake);
+    expect(spec.flags).toEqual(['-l', '-i']);
   });
+
+  it('returns sh-flavoured spec (no rcfile flags) when $SHELL is plain sh', () => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'bmx-shell-'));
+    const fake = join(tmpDir, 'sh');
+    writeFileSync(fake, '#!/bin/sh\nexec "$@"\n');
+    chmodSync(fake, 0o755);
+    const spec = resolveUserShell({ SHELL: fake });
+    expect(spec.shell).toBe(fake);
+    expect(spec.flags).toEqual([]);
+  });
+
+  it('Codex Blocker 2: falls back to a POSIX shell when $SHELL is fish', () => {
+    // Our SCRIPT is POSIX-syntax. fish/nu/csh would mis-parse `cd -- "$1"`
+    // and `exec /usr/bin/env "$@"` and break the launch. Detect non-POSIX
+    // shells and fall back so fish/nu users don't get a totally dead session.
+    tmpDir = mkdtempSync(join(tmpdir(), 'bmx-shell-'));
+    const fakeFish = join(tmpDir, 'fish');
+    writeFileSync(fakeFish, '#!/bin/sh\nexec "$@"\n');
+    chmodSync(fakeFish, 0o755);
+    const spec = resolveUserShell({ SHELL: fakeFish });
+    expect(spec.shell).not.toBe(fakeFish);
+    // Whatever we picked must be a known POSIX shell that exists.
+    expect(['/bin/zsh', '/bin/bash', '/bin/sh']).toContain(spec.shell);
+    expect(existsSync(spec.shell)).toBe(true);
+  });
+
+  it('falls back through /bin/zsh → /bin/bash → /bin/sh when $SHELL is unset', () => {
+    const spec = resolveUserShell({});
+    expect(['/bin/zsh', '/bin/bash', '/bin/sh']).toContain(spec.shell);
+    expect(existsSync(spec.shell)).toBe(true);
+    if (spec.shell === '/bin/zsh') expect(spec.flags).toEqual(['-l', '-i']);
+    else if (spec.shell === '/bin/bash') expect(spec.flags).toEqual(['-i']);
+    else expect(spec.flags).toEqual([]);
+  });
+
+  it('skips $SHELL when the path is not executable and walks the fallback list', () => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'bmx-shell-'));
+    const bogus = join(tmpDir, 'not-executable');
+    writeFileSync(bogus, 'not a real shell');
+    chmodSync(bogus, 0o644);
+    const spec = resolveUserShell({ SHELL: bogus });
+    expect(spec.shell).not.toBe(bogus);
+    expect(['/bin/zsh', '/bin/bash', '/bin/sh']).toContain(spec.shell);
+  });
+});
+
+describe('buildDebugKeepShellScript()', () => {
+  it('keeps the wrapper alive after the CLI exits (no `exec` on env)', () => {
+    const s = buildDebugKeepShellScript('/bin/zsh');
+    // Critical: there must NOT be `exec /usr/bin/env` in the debug variant —
+    // otherwise the CLI would replace the shell process and the user would
+    // lose the prompt we promised them.
+    expect(s).not.toMatch(/\bexec\s+\/usr\/bin\/env/);
+    expect(s).toMatch(/\/usr\/bin\/env "\$@"/);
+    // After the CLI runs, must hand off to an interactive shell.
+    expect(s).toMatch(/exec '\/bin\/zsh' -i$/);
+  });
+
+  it('preserves the cd-back-to-cwd guard from the normal script', () => {
+    const s = buildDebugKeepShellScript('/bin/bash');
+    expect(s).toMatch(/^cd -- "\$1" && shift/);
+  });
+
+  it('emits a clear banner so the user knows the CLI exited, not crashed', () => {
+    const s = buildDebugKeepShellScript('/bin/sh');
+    expect(s).toContain('[botmux debug]');
+    expect(s).toContain('Type exit to close the session');
+    // status code should be surfaced so a non-zero exit is obvious.
+    expect(s).toContain('status %d');
+    expect(s).toContain('"$?"');
+  });
+
+  it('single-quotes the shell path safely even when it contains apostrophes', () => {
+    // We don't expect this in practice, but `accessSync` doesn't reject it and
+    // a malformed single-quote in the embedded SCRIPT would make the wrapper
+    // line desync. The escape pattern `'\\''` (close-quote, escaped quote,
+    // reopen-quote) is the standard POSIX way to embed a single quote.
+    const s = buildDebugKeepShellScript(`/weird/shell/with'apostrophe`);
+    expect(s).toContain(`'/weird/shell/with'\\''apostrophe'`);
+  });
+});
+
+describe('debug keep-shell wrapper end-to-end', () => {
+  // Validates the debug script's behaviour using a real shell: a fake CLI
+  // exits with a known code, the wrapper banner appears, and a follow-up
+  // interactive shell command can still execute. This is what the user gets
+  // when they run with BOTMUX_DEBUG_KEEP_SHELL=1.
+  const hasEnvBin = existsSync('/usr/bin/env');
+
+  it.skipIf(!hasEnvBin)(
+    'after CLI exits, the wrapper hands off to interactive shell with banner',
+    () => {
+      // We can't easily verify a true interactive shell from spawnSync (it
+      // needs a tty), but we CAN verify the script structure with `sh -n`
+      // (syntax-check) and that the CLI-stage portion runs to completion.
+      const script = buildDebugKeepShellScript('/bin/sh');
+      // Syntax-check the script in /bin/sh — guards against typos in the
+      // template that no test of buildDebugKeepShellScript alone would catch.
+      const syntaxCheck = spawnSync('/bin/sh', ['-n', '-c', script], {
+        encoding: 'utf-8',
+      });
+      expect(syntaxCheck.status).toBe(0);
+      expect(syntaxCheck.stderr).toBe('');
+
+      // Now run a non-interactive version where the trailing `exec sh -i`
+      // is replaced by a probe — proves cd / env-injection / banner all work.
+      const probeScript = script.replace(`exec '/bin/sh' -i`, 'echo PROBE-RAN');
+      const result = spawnSync(
+        '/bin/sh',
+        ['-c', probeScript, '_',
+          tmpdir(),               // $1 cwd
+          'BOTMUX=1',              // env injection
+          '/bin/sh', '-c', 'exit 7',  // fake CLI exiting non-zero
+        ],
+        { encoding: 'utf-8' },
+      );
+      expect(result.status).toBe(0);             // wrapper itself succeeds
+      expect(result.stderr).toContain('[botmux debug]');
+      expect(result.stderr).toContain('status 7'); // surfaced fake CLI exit
+      expect(result.stdout).toContain('PROBE-RAN');
+    },
+  );
+});
+
+describe('shell wrapper end-to-end (the contract spawn() builds)', () => {
+  // These tests exercise the full wrapper invocation shape using real shells,
+  // independent of tmux. If any of these fail, spawning a CLI inside tmux
+  // will fail the same way.
+
+  const envBin = '/usr/bin/env';
+  const hasEnvBin = existsSync(envBin);
+  const hasBash = existsSync('/bin/bash');
+  const SCRIPT = SHELL_WRAPPER_SCRIPT;
+
+  let tmpDir: string | undefined;
+  afterEach(() => {
+    if (tmpDir) {
+      rmSync(tmpDir, { recursive: true, force: true });
+      tmpDir = undefined;
+    }
+  });
+
+  it.skipIf(!hasEnvBin)(
+    'env(1) injection lands AFTER rcfile would have run (per-bot overrides survive)',
+    () => {
+      const cwd = tmpdir();
+      // Wrapper script also cd's to $1, so cwd has to be a real dir.
+      const result = spawnSync(
+        '/bin/sh',
+        ['-c', SCRIPT, '_',
+          cwd,
+          'LARK_APP_ID=fresh',
+          'LARK_APP_SECRET=fresh-secret',
+          '/usr/bin/env',
+        ],
+        { encoding: 'utf-8', env: { LARK_APP_ID: 'stale', LARK_APP_SECRET: 'stale-secret', PATH: '/usr/bin:/bin' } },
+      );
+      expect(result.status).toBe(0);
+      const lines = result.stdout.split('\n');
+      expect(lines).toContain('LARK_APP_ID=fresh');
+      expect(lines).toContain('LARK_APP_SECRET=fresh-secret');
+      expect(lines).not.toContain('LARK_APP_ID=stale');
+    },
+  );
+
+  it.skipIf(!hasEnvBin)(
+    'args with spaces / quotes / newlines reach the CLI verbatim (no shell escaping)',
+    () => {
+      const tricky = 'with space "and quotes" `backticks` $vars';
+      const result = spawnSync(
+        '/bin/sh',
+        ['-c', SCRIPT, '_',
+          tmpdir(),
+          'BOTMUX=1',
+          '/bin/sh', '-c', 'printf "%s\\n" "$@"', '_',
+          tricky,
+          'line1\nline2',
+        ],
+        { encoding: 'utf-8', env: { PATH: '/usr/bin:/bin' } },
+      );
+      expect(result.status).toBe(0);
+      expect(result.stdout).toBe(`${tricky}\nline1\nline2\n`);
+    },
+  );
+
+  it.skipIf(!hasBash || !hasEnvBin)(
+    'Codex Blocker 1: bash with -i (no -l) loads .bashrc so a nvm/pnpm-style PATH is picked up',
+    () => {
+      // Plant a fake "node" in tmpdir, set HOME to a temp dir whose .bashrc
+      // prepends that dir to PATH, and confirm `/usr/bin/env node` resolves
+      // to our planted one. Pre-fix wrapper used `bash -l -i` which doesn't
+      // source .bashrc unless .bash_profile does, breaking this exact path.
+      tmpDir = mkdtempSync(join(tmpdir(), 'bmx-bashrc-'));
+      const home = tmpDir;
+      const fakeBin = join(home, 'bin');
+      writeFileSync(join(home, '.bashrc'),
+        `export PATH="${fakeBin}:$PATH"\n` +
+        `echo loaded-bashrc 1>&2\n`,
+      );
+      // No .bash_profile / .bash_login / .profile — so -l would NOT load .bashrc.
+      // -i alone must still pick it up.
+      const fakeBinDir = fakeBin;
+      const { mkdirSync, writeFileSync: wf } = require('node:fs') as typeof import('node:fs');
+      mkdirSync(fakeBinDir, { recursive: true });
+      wf(join(fakeBinDir, 'node'), '#!/bin/sh\necho fake-node-was-found\n');
+      chmodSync(join(fakeBinDir, 'node'), 0o755);
+
+      const result = spawnSync(
+        '/bin/bash',
+        ['-i', '-c', SCRIPT, '_',
+          home,
+          'BOTMUX=1',
+          '/usr/bin/env', 'node',
+        ],
+        { encoding: 'utf-8', env: { HOME: home, PATH: '/usr/bin:/bin' } },
+      );
+      expect(result.status).toBe(0);
+      expect(result.stdout.trim()).toBe('fake-node-was-found');
+      expect(result.stderr).toContain('loaded-bashrc');
+    },
+  );
+
+  it.skipIf(!hasEnvBin)(
+    'Codex non-blocker: rcfile that cd\'s away does NOT change the CLI\'s final cwd',
+    () => {
+      // Build a wrapper invocation that emulates "rcfile cd'd to /tmp", then
+      // asserts the script's `cd -- "$1"` puts us back where botmux asked.
+      const target = mkdtempSync(join(tmpdir(), 'bmx-cwd-'));
+      try {
+        // Use sh to emulate a rcfile that cd's. The wrapper SCRIPT cd's first
+        // anyway, so we hand-roll the equivalent: pre-cd somewhere wrong, then
+        // run the wrapper. The wrapper's `cd -- "$1"` must override.
+        const result = spawnSync(
+          '/bin/sh',
+          ['-c',
+            // Pretend rcfile cd'd to /tmp; then invoke our wrapper.
+            `cd /tmp && /bin/sh -c '${SCRIPT}' _ "$@"`,
+            '_',
+            target,                       // $1 inside wrapper
+            'BOTMUX=1',
+            '/bin/sh', '-c', 'pwd', '_',
+          ],
+          { encoding: 'utf-8', env: { PATH: '/usr/bin:/bin' } },
+        );
+        expect(result.status).toBe(0);
+        // realpath because mkdtemp under /tmp may resolve to /private/tmp on macOS.
+        const realpathSync = (require('node:fs') as typeof import('node:fs')).realpathSync;
+        expect(realpathSync(result.stdout.trim())).toBe(realpathSync(target));
+      } finally {
+        rmSync(target, { recursive: true, force: true });
+      }
+    },
+  );
 });

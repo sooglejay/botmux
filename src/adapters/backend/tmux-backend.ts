@@ -1,5 +1,7 @@
 import * as pty from 'node-pty';
 import { execSync, execFileSync } from 'node:child_process';
+import { accessSync, constants as fsConstants } from 'node:fs';
+import { basename } from 'node:path';
 import type { SessionBackend, SpawnOpts } from './types.js';
 import { probeTmuxFunctional, tmuxEnv } from '../../setup/ensure-tmux.js';
 import { logger } from '../../utils/logger.js';
@@ -111,24 +113,62 @@ export class TmuxBackend implements SessionBackend {
         env: childEnv,
       });
     } else {
-      // tmux server inherits env from its first session's creator; subsequent
-      // sessions share that server env, which is frozen at first-spawn time
-      // and may be missing PATH/NVM_BIN/PNPM_HOME entries the daemon's caller
-      // added via .zshrc. To make tmux-backend behave like PtyBackend (which
-      // forwards daemon process.env directly via pty.spawn's env option), we
-      // pass every var in opts.env through `-e KEY=VAL`, except a small
-      // blacklist of vars that would actively confuse tmux or that are
-      // process-local (TMUX, _, OLDPWD, PWD, SHLVL).
-      const envFlags = buildTmuxSessionEnvFlags(opts.env);
+      // Run the CLI inside a fresh user shell so PATH / NVM_BIN / PNPM_HOME /
+      // mise / fnm / asdf shims set up in the user's rcfiles are loaded the
+      // way `coco` (or any other CLI) would see them if the user opened a
+      // terminal and ran it themselves.
+      //
+      // Shape:
+      //   tmux new-session -- <shell> <shellFlags> -c <SCRIPT> _ <cwd> KEY=VAL... bin args...
+      //
+      //   - <shell> + <shellFlags> come from resolveUserShell() and are
+      //     bash/zsh/sh-specific (bash needs `-i` for .bashrc; zsh needs
+      //     `-l -i` for .zprofile + .zshrc). fish/csh/nu are remapped to a
+      //     POSIX fallback because our SCRIPT is POSIX-syntax.
+      //   - SCRIPT = `cd -- "$1" && shift && exec /usr/bin/env "$@"`:
+      //       * `cd -- "$1"` returns to the session's intended cwd even if
+      //         the rcfile changed directory mid-load (.zshrc/.bashrc with
+      //         a `cd ~/work` left in by mistake stays in opts.cwd).
+      //       * `exec /usr/bin/env "$@"`: env(1) parses the leading KEY=VAL
+      //         pairs in argv as overrides for the child process. This lands
+      //         AFTER rcfile load, so botmux's per-bot LARK_APP_ID wins over
+      //         a stale `export LARK_APP_ID=...` someone left in their .zshrc.
+      //   - `_` is the $0 placeholder; the remaining argv items are seen as
+      //     "$@" by the shell, so spaces / quotes / `$` / newlines in cwd,
+      //     env values, or args never need shell-escaping.
+      //   - tmux's own `-e KEY=VAL` is deliberately NOT used: it sets the
+      //     session env (visible to the shell), which means the user's rcfile
+      //     could `unset` or `export` over it before the CLI sees it. env(1)
+      //     injection happens after rcfile load and is authoritative.
+      const shellSpec = resolveUserShell();
+      const envAssignments = buildBotmuxEnvAssignments(opts.env);
+      // Debug knob — when on, the wrapper does NOT `exec` the CLI; it runs the
+      // CLI as a child and then drops into an interactive `$shell -i` so the
+      // user can poke at PATH / NVM / pnpm in the web terminal after exiting
+      // the CLI with Ctrl-C. Worker will still think the CLI is alive (it
+      // can't see the child-vs-exec distinction), so don't send messages
+      // through the bot while in this mode — type into the web terminal directly.
+      const debugKeepShell = process.env.BOTMUX_DEBUG_KEEP_SHELL === '1';
+      const script = debugKeepShell
+        ? buildDebugKeepShellScript(shellSpec.shell)
+        : SHELL_WRAPPER_SCRIPT;
+      if (debugKeepShell) {
+        logger.info(
+          `[tmux:${this.sessionName}] BOTMUX_DEBUG_KEEP_SHELL=1 — CLI exit will drop ` +
+          `to interactive ${shellSpec.shell} in the web terminal`,
+        );
+      }
 
-      // Create new tmux session running the CLI command
       const tmuxArgs = [
         'new-session',
         '-s', this.sessionName,
-        ...envFlags,
         '-x', String(opts.cols),
         '-y', String(opts.rows),
-        '--', bin, ...args,
+        '--',
+        shellSpec.shell, ...shellSpec.flags, '-c', script, '_',
+        opts.cwd,
+        ...envAssignments,
+        bin, ...args,
       ];
       this.process = pty.spawn('tmux', tmuxArgs, {
         name: 'xterm-256color',
@@ -358,53 +398,163 @@ export class TmuxBackend implements SessionBackend {
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 /**
- * Vars NOT to forward via `-e` to a new tmux session.
+ * The minimal set of env vars that botmux must inject into the CLI process
+ * itself — values that user rcfiles cannot derive on their own (per-bot
+ * credentials, the daemon-assigned data directory, the BOTMUX marker, the
+ * Claude root-mode escape hatch, the session owner's open_id).
  *
- *   - TMUX / TMUX_PANE: tmuxEnv() already strips these from the tmux client's
- *     own env; keep them out of the spawned CLI's env too so any tmux child
- *     the CLI itself spawns can't sneak through and target a dead socket.
- *   - PWD / OLDPWD: tmux uses the `cwd` we pass via pty.spawn options;
- *     forwarding PWD verbatim would override that with the daemon's cwd.
- *   - SHLVL / `_`: shell-local bookkeeping that's meaningless in the child
- *     and confusing if a user runs `env` inside the CLI.
+ * Anything outside this list (PATH, HOME, NVM_BIN, PNPM_HOME, LANG, …) is
+ * deliberately NOT forwarded from the daemon — the wrapping `$SHELL -l -i`
+ * pass loads the user's rcfiles, and whatever they set is what the CLI sees.
+ * This matches the user's mental model: "the tmux session should be like a
+ * fresh terminal where the user runs the CLI manually."
+ *
+ * These values are injected via `/usr/bin/env KEY=VAL ... cli args` (not tmux
+ * `-e`) so they land *after* rcfile load and override any leftover same-named
+ * exports in the user's rcfile (e.g. an old `LARK_APP_ID` from a previous bot).
  */
-const TMUX_PASSTHROUGH_BLACKLIST: ReadonlySet<string> = new Set([
-  'TMUX',
-  'TMUX_PANE',
-  'PWD',
-  'OLDPWD',
-  'SHLVL',
-  '_',
-]);
-
-/** Valid POSIX-ish env var name. `-e KEY=VAL` would silently misbehave with
- *  keys that contain `=` or unusual characters; clamp here so a malformed
- *  parent env can't desync tmux's argv. */
-const ENV_VAR_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const BOTMUX_INJECTED_ENV_KEYS = [
+  'LARK_APP_ID',
+  'LARK_APP_SECRET',
+  '__OWNER_OPEN_ID',
+  'BOTMUX',
+  'SESSION_DATA_DIR',
+  'IS_SANDBOX',
+] as const;
 
 /**
- * Build `-e KEY=VAL ...` argv flags for `tmux new-session`. Forwards every
- * defined entry in `env` (so the CLI inherits PATH / NVM_* / PNPM_HOME /
- * LARK_APP_*, etc.) except the blacklist above and entries whose key isn't
- * a valid env-var name. Pure function so it can be unit-tested without
- * spawning tmux.
- *
- * Background: tmux `new-session ... -- cmd` runs cmd with the tmux **server's**
- * env, not the env we pass to `pty.spawn('tmux', ...)`. Whatever isn't
- * forwarded via `-e` gets dropped on the floor — that's how CoCo (and any
- * other `#!/usr/bin/env node` script installed under nvm/pnpm) used to land
- * in a tmux session with a PATH that doesn't see `node`.
+ * Build the `KEY=VAL` argv slice passed to `/usr/bin/env`. Only forwards the
+ * keys in `BOTMUX_INJECTED_ENV_KEYS` and only when the value is defined —
+ * `IS_SANDBOX` for instance is only set when the daemon is running as root.
+ * Pure function for unit-testing without spawning tmux.
  */
-export function buildTmuxSessionEnvFlags(env: NodeJS.ProcessEnv | undefined): string[] {
+export function buildBotmuxEnvAssignments(env: NodeJS.ProcessEnv | undefined): string[] {
   if (!env) return [];
-  const flags: string[] = [];
-  for (const [key, val] of Object.entries(env)) {
+  const out: string[] = [];
+  for (const key of BOTMUX_INJECTED_ENV_KEYS) {
+    const val = env[key];
     if (val === undefined) continue;
-    if (TMUX_PASSTHROUGH_BLACKLIST.has(key)) continue;
-    if (!ENV_VAR_NAME_RE.test(key)) continue;
-    flags.push('-e', `${key}=${val}`);
+    out.push(`${key}=${val}`);
   }
-  return flags;
+  return out;
+}
+
+/**
+ * Default wrapper script for `<shell> -c`. Sees argv as:
+ *   $0 = '_' (placeholder), $1 = cwd, $2..N = KEY=VAL... bin args...
+ *
+ * The `cd` step makes the CLI's cwd survive a wayward `cd` in the user's
+ * rcfile. The `exec /usr/bin/env` step injects botmux's per-bot/per-session
+ * overrides AFTER rcfile load so they can't be shadowed by leftover exports.
+ *
+ * POSIX-syntax (works in bash/zsh/sh); fish/csh/nu users get remapped to
+ * bash/zsh/sh by resolveUserShell() so they hit the same SCRIPT path.
+ */
+export const SHELL_WRAPPER_SCRIPT = 'cd -- "$1" && shift && exec /usr/bin/env "$@"';
+
+/**
+ * Debug variant of the wrapper script — same prelude, but the CLI runs as
+ * a *child* (no `exec`) and the wrapper hands off to an interactive shell
+ * once the CLI exits. Useful for diagnosing missing PATH / NVM / pnpm /
+ * mise shims in the user's rcfile: hit Ctrl-C in the web terminal, land
+ * in `<shell> -i`, run `echo $PATH` / `which node` / etc.
+ *
+ * Enabled with `BOTMUX_DEBUG_KEEP_SHELL=1` at daemon-start time.
+ *
+ * `shellPath` is single-quoted into the script with `'` escaped, so it's
+ * safe for paths containing spaces or quotes. Caller has already verified
+ * it via accessSync().
+ */
+export function buildDebugKeepShellScript(shellPath: string): string {
+  const safeShell = shellPath.replace(/'/g, `'\\''`);
+  return [
+    'cd -- "$1" && shift',
+    '/usr/bin/env "$@"',
+    `printf '\\n[botmux debug] CLI exited (status %d) — interactive shell active. Type exit to close the session.\\n' "$?" >&2`,
+    `exec '${safeShell}' -i`,
+  ].join('; ');
+}
+
+export type ShellKind = 'bash' | 'zsh' | 'sh';
+
+export interface ShellSpec {
+  /** Absolute path to the shell binary. */
+  shell: string;
+  /** Rcfile-loading flags (`-i`, `-l -i`, or empty) — caller appends
+   *  `-c <SCRIPT> _ <cwd> KEY=VAL... bin args...` after these. */
+  flags: string[];
+}
+
+/** Map a shell kind to the right rcfile-loading flags. The choice of flags
+ *  is the part that actually differs between bash and zsh:
+ *   - bash login shell does NOT auto-source .bashrc; many users only have
+ *     nvm/fnm/pnpm hooks in .bashrc; using `-l` here would miss them.
+ *     Plain `-i` loads .bashrc, which is what we want.
+ *   - zsh interactive shell loads .zshrc; login loads .zprofile + .zlogin.
+ *     Combine `-l -i` so installs in either location surface.
+ *   - sh has no rcfile we can rely on portably; skip rcfile flags. */
+function specForKind(shell: string, kind: ShellKind): ShellSpec {
+  const flags: string[] = [];
+  if (kind === 'bash') flags.push('-i');
+  else if (kind === 'zsh') flags.push('-l', '-i');
+  // 'sh' adds nothing — POSIX sh has no portable interactive rcfile.
+  return { shell, flags };
+}
+
+/** Classify a shell binary path by basename. Returns null for shells whose
+ *  syntax we don't support (fish, nu, csh, tcsh, ...). */
+function classifyShell(path: string): ShellKind | null {
+  const base = basename(path);
+  if (base === 'bash') return 'bash';
+  if (base === 'zsh') return 'zsh';
+  if (base === 'sh' || base === 'dash' || base === 'ash') return 'sh';
+  return null;
+}
+
+function isExecutable(path: string): boolean {
+  try {
+    accessSync(path, fsConstants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Pick a shell to wrap the CLI launch in, returning the binary path plus the
+ * exact argv flags needed for its rcfiles to load. Tries `$SHELL` first, then
+ * `/bin/zsh` → `/bin/bash` → `/bin/sh`.
+ *
+ * If `$SHELL` is fish/nu/csh/etc., emits a warning and falls back to a POSIX
+ * shell — our wrapper SCRIPT is POSIX-syntax and would break under fish. The
+ * user can still configure their CLI's PATH/etc. inside the fallback shell's
+ * rcfile if needed; the alternative (run their fish rcfile under a POSIX
+ * harness) does not work.
+ *
+ * Always returns a usable ShellSpec — the last-resort `/bin/sh` fallback is
+ * close enough to universal that surfacing an error here would do more harm
+ * than good. If `/bin/sh` is also missing, tmux's own spawn will fail with
+ * a clear message.
+ */
+export function resolveUserShell(env: NodeJS.ProcessEnv = process.env): ShellSpec {
+  const userShell = env.SHELL;
+  if (userShell && isExecutable(userShell)) {
+    const kind = classifyShell(userShell);
+    if (kind) return specForKind(userShell, kind);
+    logger.warn(
+      `[tmux-backend] $SHELL=${userShell} is not bash/zsh/sh; ` +
+      `falling back to a POSIX shell for the wrapper. ` +
+      `Configure CLI PATH/env in the fallback shell's rcfile if needed.`,
+    );
+  }
+  for (const candidate of ['/bin/zsh', '/bin/bash', '/bin/sh'] as const) {
+    if (!isExecutable(candidate)) continue;
+    const kind = classifyShell(candidate);
+    if (!kind) continue;
+    return specForKind(candidate, kind);
+  }
+  // /bin/sh missing too — return it anyway and let tmux surface the error.
+  return specForKind('/bin/sh', 'sh');
 }
 
 /** Minimal shell-escape for tmux session names (alphanumeric + dash). */
