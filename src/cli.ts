@@ -1482,6 +1482,10 @@ botmux v${getVersion()} — IM ↔ AI 编程 CLI 桥接
   bots list                            列出当前群聊中的机器人（含 open_id）
   thread messages [--limit N]          拉取当前话题的消息历史 (JSON)
 
+新建飞书群:
+  create-group --bot <name> [--bot ...] [--name "群名"]
+                                       用指定 bot 起新群；详见 \`botmux create-group --help\`
+
 配置目录: ~/.botmux/
 文档: https://github.com/deepcoldy/botmux
 `);
@@ -2160,6 +2164,153 @@ async function cmdSend(rest: string[]): Promise<void> {
   }
 }
 
+// ─── Create-group subcommand ─────────────────────────────────────────────────
+
+async function cmdCreateGroup(rest: string[]): Promise<void> {
+  if (rest.includes('--help') || rest.includes('-h')) {
+    console.log(`
+botmux create-group — 用一组机器人新建飞书群
+
+用法:
+  botmux create-group --bot <name|larkAppId> [--bot ...] [--name "群名"]
+
+参数:
+  --bot <ref>     至少一个，可多次。ref 推荐用 bot 显示名（同 botmux send 的 @<name>）或完整 larkAppId；
+                  cliId（如 claude-code）仅作 fallback —— 多个 bot 常共用同一个 cliId，重名命中只能取
+                  bots.json 中第一个。重名 → 取 bots.json 中第一个匹配，stderr 打 warning。
+                  重复 ref → 自动去重保留首次顺序。
+  --name <群名>   可选；不传则用飞书默认无名群。
+
+行为:
+  - 第一个解析到的 bot 作为 creator（决定建群身份 + 初始群主 + open_id app scope）。
+  - 邀请用户 / 转让群主 / @通知 对象都从 creator 的 resolvedAllowedUsers 取首个 open_id（email 自动转换；
+    转不出来或为空则跳过对应步骤，stderr warning）。
+  - 不依赖 botmux 会话，任何环境都能跑。
+
+输出协议（skill 友好）:
+  - 成功（即使 transfer/notify 部分失败）：stdout 单行 chatId，exit 0；stderr 打人类提示 + applink。
+  - 失败（缺 --bot / 解析失败 / chat.create 抛错）：stdout 空，exit 非零；stderr 打错误。
+`);
+    return;
+  }
+
+  process.env.SESSION_DATA_DIR ??= resolveDataDir();
+
+  const botRefs = argValues(rest, '--bot');
+  const name = argValue(rest, '--name');
+
+  if (botRefs.length === 0) {
+    console.error('用法: botmux create-group --bot <name|larkAppId> [--bot ...] [--name "群名"]');
+    console.error('至少传一个 --bot。');
+    process.exit(1);
+  }
+
+  // Load bot configs (bots.json order) and bots-info.json (for botName)
+  const { registerBot, loadBotConfigs } = await import('./bot-registry.js');
+  let botConfigs: Array<{ larkAppId: string; cliId: string }>;
+  try {
+    botConfigs = loadBotConfigs().map(c => ({ larkAppId: c.larkAppId, cliId: c.cliId }));
+  } catch (err: any) {
+    console.error(`加载 bots.json 失败: ${err?.message ?? err}`);
+    process.exit(1);
+  }
+  const dataDir = resolveDataDir();
+  const botInfoPath = join(dataDir, 'bots-info.json');
+  type BotInfoEntry = { larkAppId: string; botOpenId: string | null; botName: string | null; cliId: string };
+  let botInfoEntries: BotInfoEntry[] = [];
+  try { if (existsSync(botInfoPath)) botInfoEntries = JSON.parse(readFileSync(botInfoPath, 'utf-8')); } catch { /* */ }
+
+  const { resolveBotRefs } = await import('./cli/create-group-resolver.js');
+  const resolved = resolveBotRefs(
+    botRefs,
+    botConfigs,
+    botInfoEntries.map(b => ({ larkAppId: b.larkAppId, botName: b.botName })),
+  );
+
+  for (const w of resolved.ambiguousWarnings) console.error(`⚠️  ${w}`);
+  if (resolved.invalid.length > 0) {
+    console.error(`无法解析的 --bot 引用: ${resolved.invalid.join(', ')}`);
+    console.error('可用 bot：');
+    for (const cfg of botConfigs) {
+      const info = botInfoEntries.find(b => b.larkAppId === cfg.larkAppId);
+      console.error(`  - ${info?.botName ?? '(unnamed)'}  cliId=${cfg.cliId}  ${cfg.larkAppId}`);
+    }
+    process.exit(1);
+  }
+  if (resolved.larkAppIds.length === 0) {
+    console.error('未解析到任何 bot，请检查 --bot 引用。');
+    process.exit(1);
+  }
+
+  const creatorLarkAppId = resolved.larkAppIds[0];
+
+  // Register bots so getBotClient works inside service
+  const fullConfigs = loadBotConfigs();
+  const needed = new Set(resolved.larkAppIds);
+  try {
+    for (const cfg of fullConfigs) if (needed.has(cfg.larkAppId)) registerBot(cfg);
+  } catch (err: any) {
+    console.error(`注册 bot 失败: ${err?.message ?? err}`);
+    process.exit(1);
+  }
+
+  // Derive user_open_id from creator's allowedUsers (creator app scope only).
+  // resolveAllowedUsers converts emails → open_ids via creator's Lark client.
+  const creatorCfg = fullConfigs.find(c => c.larkAppId === creatorLarkAppId);
+  const allowedRaw = creatorCfg?.allowedUsers ?? [];
+  const { resolveAllowedUsers } = await import('./im/lark/client.js');
+  let creatorAllowedOpenIds: string[] = [];
+  try {
+    creatorAllowedOpenIds = await resolveAllowedUsers(creatorLarkAppId, allowedRaw);
+  } catch (err: any) {
+    console.error(`⚠️  解析 creator allowedUsers 失败: ${err?.message ?? err}（继续创建空群）`);
+  }
+  const targetOpenId = creatorAllowedOpenIds[0];
+  if (!targetOpenId) {
+    console.error('⚠️  creator bot 的 allowedUsers 没有可用 open_id — 将创建仅含 bot 的群（跳过邀请/转让/@通知）。');
+  }
+
+  const { createGroupWithBots } = await import('./services/group-creator.js');
+  let result;
+  try {
+    result = await createGroupWithBots({
+      creatorLarkAppId,
+      larkAppIds: resolved.larkAppIds,
+      name: name?.trim() || undefined,
+      userOpenIds: targetOpenId ? [targetOpenId] : [],
+      transferOwnerTo: targetOpenId,
+      notifyOwnerOpenId: targetOpenId,
+    });
+  } catch (err: any) {
+    console.error(`建群失败: ${err?.message ?? err}`);
+    process.exit(1);
+  }
+
+  // Always stdout chatId on createChat success — even if transfer/notify
+  // partially failed, the chat exists and retrying would create duplicates.
+  process.stdout.write(`${result.chatId}\n`);
+
+  // Human-readable summary + warnings → stderr.
+  const link = `https://applink.feishu.cn/client/chat/open?openChatId=${encodeURIComponent(result.chatId)}`;
+  console.error(`✅ 群已创建：${link}`);
+  if (result.invalidBotIds.length > 0) {
+    console.error(`⚠️  飞书拒绝邀请的 bot: ${result.invalidBotIds.join(', ')}`);
+  }
+  if (result.invalidUserIds.length > 0) {
+    console.error(`⚠️  飞书拒绝邀请的 user: ${result.invalidUserIds.join(', ')}`);
+  }
+  if (result.transferError) {
+    console.error(`⚠️  群主转让失败 (${result.transferError}) — 当前群主仍为 creator bot`);
+  } else if (result.ownerTransferredTo) {
+    console.error(`✅ 群主已转让给 ${result.ownerTransferredTo}`);
+  }
+  if (result.notifyError) {
+    console.error(`⚠️  @通知发送失败: ${result.notifyError}`);
+  } else if (result.notifyMessageId) {
+    console.error(`✅ @通知已发送 (msg ${result.notifyMessageId})`);
+  }
+}
+
 // ─── Bots subcommand ─────────────────────────────────────────────────────────
 
 async function cmdBots(sub: string, rest: string[]): Promise<void> {
@@ -2247,6 +2398,7 @@ switch (command) {
   case 'resume':  await cmdResume(); break;
   case 'schedule': await cmdSchedule(process.argv[3] ?? '', process.argv.slice(4)); break;
   case 'send':     await cmdSend(process.argv.slice(3)); break;
+  case 'create-group': await cmdCreateGroup(process.argv.slice(3)); break;
   case 'bots':     await cmdBots(process.argv[3] ?? 'list', process.argv.slice(4)); break;
   case 'thread':   {
     const sub = process.argv[3] ?? '';
