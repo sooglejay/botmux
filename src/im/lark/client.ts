@@ -469,6 +469,10 @@ async function resolveThreadId(c: any, rootMessageId: string): Promise<string | 
   return undefined;
 }
 
+/** Lark message.list rejects page_size > 50 with field_violations (max 50).
+ *  Callers can still ask for more via pageSize — we just paginate harder. */
+const LARK_MESSAGE_LIST_MAX_PAGE = 50;
+
 /** List thread messages using container_id_type="thread" (fast path). */
 async function listByThread(c: any, threadId: string, pageSize: number): Promise<any[]> {
   const allMessages: any[] = [];
@@ -479,7 +483,7 @@ async function listByThread(c: any, threadId: string, pageSize: number): Promise
       params: {
         container_id_type: 'thread' as any,
         container_id: threadId,
-        page_size: pageSize,
+        page_size: Math.min(pageSize, LARK_MESSAGE_LIST_MAX_PAGE),
         sort_type: 'ByCreateTimeAsc' as any,
         ...(pageToken ? { page_token: pageToken } : {}),
       },
@@ -497,7 +501,7 @@ async function listByThread(c: any, threadId: string, pageSize: number): Promise
     if (allMessages.length >= pageSize) break;
   } while (pageToken);
 
-  return allMessages;
+  return allMessages.slice(0, pageSize);
 }
 
 /** List chat-container messages since a given epoch (ms), most-recent first
@@ -521,7 +525,7 @@ export async function listChatMessagesSince(
       params: {
         container_id_type: 'chat' as any,
         container_id: chatId,
-        page_size: pageSize,
+        page_size: Math.min(pageSize, LARK_MESSAGE_LIST_MAX_PAGE),
         sort_type: 'ByCreateTimeDesc' as any,
         start_time: String(startSec),
         ...(pageToken ? { page_token: pageToken } : {}),
@@ -554,7 +558,7 @@ async function listByChatFilter(c: any, chatId: string, rootMessageId: string, p
       params: {
         container_id_type: 'chat' as any,
         container_id: chatId,
-        page_size: pageSize,
+        page_size: Math.min(pageSize, LARK_MESSAGE_LIST_MAX_PAGE),
         sort_type: 'ByCreateTimeDesc' as any,
         ...(pageToken ? { page_token: pageToken } : {}),
       },
