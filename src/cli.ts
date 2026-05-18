@@ -385,16 +385,18 @@ async function promptBotConfig(rl: ReturnType<typeof createInterface>): Promise<
     allowedUsers = allowedUsersInput;
   }
 
-  // brand 必须持久化: cmdStart 的 validate / event-dispatcher 走的 deep link
-  // 都看这个字段; 不写就只能硬编码 feishu, lark 租户用户会被打成凭证无效.
-  // 为了向后兼容 (旧 bots.json 没 brand 字段), reader 应当 default 到 'feishu'.
+  // 不再持久化 brand 字段: setup 阶段 brand=lark 直接被 obtainCredentials 中止,
+  // 落盘的永远是 'feishu', 写进配置是死字段. 等 lark 完整接入再加回来, 那时
+  // 同步打开 daemon 链路的 brand 透传. botBrand() helper 读不到字段会 default
+  // 到 'feishu', 兼容旧版同时支持将来扩展.
   const bot: Record<string, any> = {
     larkAppId: creds.appId,
     larkAppSecret: creds.appSecret,
-    brand: creds.brand,
     cliId,
+    // 总是写 workingDir, 留空用 '~'. 用户手动编辑 bots.json 时一眼能看到字段
+    // 在哪儿, 不用去 README 查字段名.
+    workingDir: workingDir.trim() || '~',
   };
-  if (workingDir) bot.workingDir = workingDir;
   if (allowedUsers) bot.allowedUsers = allowedUsers.split(',').map((s: string) => s.trim()).filter(Boolean);
 
   return bot;
