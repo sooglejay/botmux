@@ -483,9 +483,15 @@ export function isBotMentioned(larkAppId: string, message: any, _senderOpenId: s
 // so an unbound sibling doesn't fall back to allowedUsers and reply
 // "⚠️ 无操作权限" when @-mentioned in a shared oncall workspace.
 
+/** per-chat per-user 授权命中判断（仅用于 canTalk —— 不给管理命令权）。 */
+function hasChatGrant(larkAppId: string, chatId: string | undefined, openId: string | undefined): boolean {
+  return !!chatId && !!openId && !!getBot(larkAppId).config.chatGrants?.[chatId]?.includes(openId);
+}
+
 export function canTalk(larkAppId: string, chatId: string | undefined, senderOpenId: string | undefined): boolean {
   if (chatId && isChatOncallBoundForAnyBot(chatId)) return true;
   if (isKnownPeerBot(config.session.dataDir, larkAppId, senderOpenId)) return true;
+  if (hasChatGrant(larkAppId, chatId, senderOpenId)) return true;
   const allowedUsers = getBot(larkAppId).resolvedAllowedUsers;
   if (allowedUsers.length === 0) return true;
   return !!senderOpenId && allowedUsers.includes(senderOpenId);

@@ -9,7 +9,7 @@ const __dirname = dirname(__filename);
 import { config } from './config.js';
 import { statSync } from 'node:fs';
 import { getChatMode, replyMessage, resolveAllowedUsers, sendMessage } from './im/lark/client.js';
-import { loadBotConfigs, registerBot, getBot, getAllBots, findOncallChatForAnyBot, isChatOncallBoundForAnyBot, type BotState, type OncallChat } from './bot-registry.js';
+import { loadBotConfigs, registerBot, getBot, getAllBots, findOncallChatForAnyBot, type BotState, type OncallChat } from './bot-registry.js';
 import * as sessionStore from './services/session-store.js';
 import * as chatFirstSeenStore from './services/chat-first-seen-store.js';
 import { autoBindOncallFromDefault } from './services/oncall-store.js';
@@ -453,12 +453,12 @@ async function handleNewTopic(data: any, ctx: RoutingContext): Promise<void> {
       return;
     }
     if (DAEMON_COMMANDS.has(cmd)) {
-      // Oncall groups: anyone can chat with the bot, but daemon commands
-      // (including /oncall itself) require allowedUsers. Treat the chat as
-      // oncall when ANY bot has it bound — sibling bots in multi-bot
-      // deployments inherit the same gate so /cd /restart /close don't slip
-      // past allowedUsers just because this bot wasn't the one that bound.
-      if (isChatOncallBoundForAnyBot(chatId) && !canOperate(larkAppId, chatId, senderOpenId)) {
+      // Daemon commands (incl. /oncall) ALWAYS require canOperate, in every chat.
+      // No-op for allowedUsers (they pass canOperate anyway); the point is to deny
+      // chat-granted users (who only pass canTalk) management commands like
+      // /cd /restart /oncall bind. Previously this gate only fired in oncall chats,
+      // which left a hole once per-chat grants flow through canTalk.
+      if (!canOperate(larkAppId, chatId, senderOpenId)) {
         await sessionReply(anchor, tr('daemon.cmd_allowed_users_only', { cmd }, localeForBot(larkAppId)), 'text', larkAppId);
         return;
       }
@@ -765,11 +765,12 @@ async function handleThreadReply(data: any, ctx: RoutingContext): Promise<void> 
       return;
     }
     if (DAEMON_COMMANDS.has(cmd)) {
-      // Oncall allowedUsers gate for thread-reply daemon commands
+      // canOperate gate for thread-reply daemon commands — required in every chat
+      // (see spawn-path gate above). Denies chat-granted users management commands.
       const existingDs = activeSessions.get(sessionKey(anchor, larkAppId));
       const threadChatId = existingDs?.chatId ?? ctxChatId ?? data?.message?.chat_id;
       const threadSenderOpenId = parsed.senderId || data?.sender?.sender_id?.open_id;
-      if (threadChatId && isChatOncallBoundForAnyBot(threadChatId) && !canOperate(larkAppId, threadChatId, threadSenderOpenId)) {
+      if (!canOperate(larkAppId, threadChatId, threadSenderOpenId)) {
         sessionReply(anchor, tr('daemon.cmd_allowed_users_only', { cmd }, localeForBot(larkAppId)), 'text', larkAppId);
         return;
       }
