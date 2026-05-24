@@ -7,13 +7,27 @@
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
+
+// Make config.session.dataDir track the per-test temp dir, so the connector
+// write delegation (handleConnectorApi uses config-default dataDir) and the
+// team-routes desensitized GET (uses deps.dataDir) share one store. Covers the
+// production "same dataDir" path Codex called out.
+const state = vi.hoisted(() => ({ dataDir: '' }));
+vi.mock('../src/config.js', () => ({
+  config: {
+    session: { get dataDir() { return state.dataDir; } },
+    web: { externalHost: 'localhost' },
+    dashboard: { externalHost: 'localhost', port: 7891 },
+  },
+}));
+
 import { handleTeamRoute } from '../src/dashboard/team-routes.js';
 import { claimPairing } from '../src/services/pairing-store.js';
 import { removeMember, DEFAULT_TEAM_ID } from '../src/services/team-store.js';
 
 let dataDir: string;
-beforeEach(() => { dataDir = mkdtempSync(join(tmpdir(), 'botmux-teamroutes-')); });
+beforeEach(() => { dataDir = mkdtempSync(join(tmpdir(), 'botmux-teamroutes-')); state.dataDir = dataDir; });
 
 function makeReq(method: string, path: string, opts: { cookie?: string; body?: unknown } = {}): any {
   const req: any = { method, url: path, headers: { cookie: opts.cookie } };
@@ -189,6 +203,35 @@ describe('handleTeamRoute', () => {
     await call(makeReq('PUT', '/api/team/bots/cli_nope/capability', { cookie: 'bmx_session=' + session, body: { capability: 'x' } }), res, '/api/team/bots/cli_nope/capability');
     expect(res.statusCode).toBe(404);
     expect(json(res).error).toBe('unknown_bot');
+  });
+
+  it('authed create returns secret once; GET list excludes plaintext secret and secretRef', async () => {
+    const session = await login();
+    const c = 'bmx_session=' + session;
+    let res = makeRes();
+    await call(makeReq('POST', '/api/team/connectors', { cookie: c, body: {
+      name: '线上报警', source: { type: 'generic' },
+      target: { kind: 'turn', mode: 'dynamic', botId: 'cli_a' },
+      promptEnvelope: { sourceName: '线上报警' },
+    } }), res, '/api/team/connectors');
+    expect(res.statusCode).toBe(201);
+    expect(json(res).secret).toBeTruthy(); // generated secret returned once
+    // GET list must not leak the plaintext secret nor the secretRef
+    res = makeRes();
+    await call(makeReq('GET', '/api/team/connectors', { cookie: c }), res, '/api/team/connectors');
+    const raw = JSON.stringify(json(res));
+    expect(json(res).connectors.length).toBe(1);
+    expect(raw).not.toContain(json(res).connectors[0].secret ?? '__none__');
+    expect(raw).not.toContain('secretRef');
+    expect(JSON.stringify(json(res).connectors[0])).not.toMatch(/secret/i);
+  });
+
+  it('a removed member cannot write a connector (403)', async () => {
+    const session = await login();
+    removeMember(dataDir, DEFAULT_TEAM_ID, { unionId: 'on_1' });
+    const res = makeRes();
+    await call(makeReq('POST', '/api/team/connectors', { cookie: 'bmx_session=' + session, body: { name: 'x', source: { type: 'generic' }, target: { kind: 'turn', mode: 'dynamic', botId: 'cli_a' } } }), res, '/api/team/connectors');
+    expect(res.statusCode).toBe(403);
   });
 
   it('logout clears the session cookie', async () => {

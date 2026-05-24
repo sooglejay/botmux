@@ -20,6 +20,7 @@ import { getTeam, removeMember, isMember } from '../services/team-store.js';
 import { createInvite } from '../services/invite-store.js';
 import { setBotCapability, clearBotCapability } from '../services/bot-profile-store.js';
 import { listConnectors } from '../services/connector-store.js';
+import { handleConnectorApi } from './connector-api.js';
 import { listTriggerLogs, summarizeTriggerLogs, type TriggerLogListOptions } from '../services/trigger-log-store.js';
 import { TEAM_PAGE_HTML } from './team-page.js';
 
@@ -193,6 +194,19 @@ export async function handleTeamRoute(
   if (path === '/api/team/invite' && method === 'POST') {
     const inv = createInvite(dataDir, session.teamId, session.identity.openId ?? session.identity.unionId ?? 'unknown');
     jsonRes(res, 200, { ok: true, code: inv.code, expiresAt: inv.expiresAt });
+    return true;
+  }
+  // Connector WRITE ops: delegate to the connector domain handler AFTER the
+  // session+membership gate above (a removed member can't reach this). GET list
+  // stays on the desensitized team handler below; webhook-secrets is NOT exposed
+  // standalone — secret handling lives inside the connector POST/PUT.
+  const isConnWrite = (path === '/api/team/connectors' && method === 'POST')
+    || (/^\/api\/team\/connectors\/[^/]+$/.test(path) && (method === 'PUT' || method === 'PATCH' || method === 'DELETE'));
+  if (isConnWrite) {
+    const delegated = new URL(url.href);
+    delegated.pathname = path.replace('/api/team/connectors', '/api/connectors');
+    const handled = await handleConnectorApi(req, res, delegated);
+    if (!handled) jsonRes(res, 404, { ok: false, error: 'not_found' });
     return true;
   }
   if (path === '/api/team/connectors' && method === 'GET') {

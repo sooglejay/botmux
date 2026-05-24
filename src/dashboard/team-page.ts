@@ -69,10 +69,10 @@ export const TEAM_PAGE_HTML = `<!doctype html>
       <table><thead><tr><th>成员</th><th>open_id</th><th></th></tr></thead><tbody id="members"></tbody></table>
     </section>
     <section class="card">
-      <h2>接入点（connectors）</h2>
-      <table><thead><tr><th>名称</th><th>来源</th><th>模式</th><th>启用</th></tr></thead>
+      <h2>接入点（connectors）<button class="primary" id="btn-newconn" style="float:right;font-size:13px;padding:4px 12px">创建接入点</button></h2>
+      <div id="conn-out" class="hide"></div>
+      <table><thead><tr><th>名称</th><th>来源</th><th>模式</th><th>启用</th><th>操作</th></tr></thead>
         <tbody id="connectors"></tbody></table>
-      <p class="hint" id="connectors-empty hide"></p>
     </section>
     <section class="card">
       <h2>最近触发</h2>
@@ -87,6 +87,26 @@ export const TEAM_PAGE_HTML = `<!doctype html>
     <p class="hint">团队级角色（该机器人跨群的默认人设）。留空并保存即删除。本群 /role 仍可覆盖。</p>
     <textarea id="modal-text" placeholder="# 角色\n用 Markdown 描述这个机器人的职责/风格…"></textarea>
     <div class="row"><button id="modal-cancel">取消</button><button class="primary" id="modal-save">保存</button></div>
+  </div></div>
+
+  <!-- Connector create modal -->
+  <div id="connmodal" class="overlay hide"><div class="modal" style="width:min(620px,94vw)">
+    <h2>创建接入点（webhook connector）</h2>
+    <div style="display:grid;gap:8px;font-size:14px">
+      <label>名称<br><input id="cn-name" style="width:100%"></label>
+      <label>来源类型<br><select id="cn-source"><option>generic</option><option>argos</option><option>meego</option><option>prometheus</option><option>github</option></select></label>
+      <label>目标类型<br><select id="cn-kind"><option value="turn">turn（触发单个机器人一轮）</option><option value="workflow">workflow（跑工作流）</option></select></label>
+      <label>投递模式<br><select id="cn-mode"><option value="dynamic">dynamic（群随请求传入）</option><option value="fixed">fixed（固定群）</option><option value="new-group">new-group（自动建群）</option></select></label>
+      <label>机器人<br><select id="cn-bot"></select></label>
+      <label id="cn-chat-l">chatId（fixed 用）<br><input id="cn-chat" style="width:100%"></label>
+      <label id="cn-allow-l">allowChats（dynamic，逗号分隔，留空=any）<br><input id="cn-allow" style="width:100%"></label>
+      <label id="cn-wf-l">workflowId<br><input id="cn-wf" style="width:100%"></label>
+      <label id="cn-dedup-l">dedupKey JSONPath（new-group）<br><input id="cn-dedup" placeholder="$.alert.fingerprint" style="width:100%"></label>
+      <label id="cn-status-l">status JSONPath（new-group）<br><input id="cn-status" placeholder="$.status" style="width:100%"></label>
+      <label>secret（留空自动生成，只显示一次）<br><input id="cn-secret" style="width:100%"></label>
+    </div>
+    <div id="connmodal-err" class="hint err"></div>
+    <div class="row"><button id="connmodal-cancel">取消</button><button class="primary" id="connmodal-save">创建</button></div>
   </div></div>
 </main>
 <script>
@@ -123,8 +143,26 @@ async function showApp(){
 
   const c = await jget('/api/team/connectors');
   $('connectors').innerHTML = (c.body?.connectors||[]).map(x =>
-    '<tr><td>'+esc(x.name)+'</td><td class="muted">'+esc(x.source?.type||x.source||'')+'</td><td>'+esc(x.target?.mode||'')+'</td><td>'+(x.enabled?'<span class=ok>开</span>':'<span class=muted>关</span>')+'</td></tr>'
-  ).join('') || '<tr><td colspan=4 class=muted>还没有接入点</td></tr>';
+    '<tr><td>'+esc(x.name)+'</td><td class="muted">'+esc(x.source?.type||x.source||'')+'</td><td>'+esc(x.target?.mode||'')+'</td><td>'+(x.enabled?'<span class=ok>开</span>':'<span class=muted>关</span>')+'</td>'
+    +'<td><button class="conn-act" data-id="'+esc(x.id)+'" data-act="toggle" data-en="'+(x.enabled?'1':'0')+'">'+(x.enabled?'停用':'启用')+'</button> '
+    +'<button class="conn-act" data-id="'+esc(x.id)+'" data-act="rotate">旋转密钥</button> '
+    +'<button class="conn-act" data-id="'+esc(x.id)+'" data-act="del">删除</button></td></tr>'
+  ).join('') || '<tr><td colspan=5 class=muted>还没有接入点</td></tr>';
+  document.querySelectorAll('.conn-act').forEach(btn => {
+    btn.onclick = async () => {
+      const id = btn.dataset.id, act = btn.dataset.act;
+      if (act === 'toggle') {
+        await fetch('/api/team/connectors/'+encodeURIComponent(id), { method:'PATCH', headers:{'content-type':'application/json'}, body: JSON.stringify({ enabled: btn.dataset.en !== '1' }) });
+      } else if (act === 'rotate') {
+        const r = await jput('/api/team/connectors/'+encodeURIComponent(id), { rotateSecret: true });
+        if (r.body?.secret) { $('conn-out').classList.remove('hide'); $('conn-out').innerHTML = '<p class="hint">新 Secret（只显示这一次）：</p><p><span class="code" style="font-size:13px;word-break:break-all">'+esc(r.body.secret)+'</span></p>'; }
+      } else if (act === 'del') {
+        if (!confirm('删除该接入点?')) return;
+        await fetch('/api/team/connectors/'+encodeURIComponent(id), { method:'DELETE' });
+      }
+      showApp();
+    };
+  });
 
   const l = await jget('/api/team/trigger-logs?limit=20');
   $('logs').innerHTML = (l.body?.logs||[]).map(x =>
@@ -170,6 +208,41 @@ $('modal-save').onclick = async () => {
   await jput('/api/team/bots/' + encodeURIComponent(app) + '/role', { role: $('modal-text').value });
   $('modal').classList.add('hide');
   showApp();
+};
+
+function syncConnFields(){
+  const mode = $('cn-mode').value, kind = $('cn-kind').value;
+  $('cn-chat-l').style.display = mode === 'fixed' ? '' : 'none';
+  $('cn-allow-l').style.display = mode === 'dynamic' ? '' : 'none';
+  $('cn-wf-l').style.display = kind === 'workflow' ? '' : 'none';
+  $('cn-dedup-l').style.display = $('cn-status-l').style.display = mode === 'new-group' ? '' : 'none';
+}
+async function openConnModal(){
+  const r = await jget('/api/team/roster');
+  $('cn-bot').innerHTML = (r.body?.bots||[]).map(b => '<option value="'+esc(b.larkAppId)+'">'+esc(b.name)+'</option>').join('');
+  $('connmodal-err').textContent = ''; syncConnFields(); $('connmodal').classList.remove('hide');
+}
+$('cn-mode').onchange = syncConnFields; $('cn-kind').onchange = syncConnFields;
+$('btn-newconn').onclick = openConnModal;
+$('connmodal-cancel').onclick = () => $('connmodal').classList.add('hide');
+$('connmodal-save').onclick = async () => {
+  const mode = $('cn-mode').value, kind = $('cn-kind').value, name = $('cn-name').value.trim();
+  if (!name) { $('connmodal-err').textContent = '请填名称'; return; }
+  const target = { kind, mode, botId: $('cn-bot').value };
+  if (mode === 'fixed') target.chatId = $('cn-chat').value.trim();
+  if (mode === 'dynamic' && $('cn-allow').value.trim()) target.allowChats = $('cn-allow').value.split(',').map(s=>s.trim()).filter(Boolean);
+  if (kind === 'workflow') target.workflowId = $('cn-wf').value.trim();
+  const body = { name, source: { type: $('cn-source').value }, target, promptEnvelope: { sourceName: name },
+    lifecycleExtractors: mode === 'new-group' ? { dedupKey: $('cn-dedup').value.trim(), status: $('cn-status').value.trim() } : null };
+  if ($('cn-secret').value.trim()) body.secret = $('cn-secret').value.trim();
+  const r = await jpost('/api/team/connectors', body);
+  if (r.status === 201 || r.body?.ok) {
+    const id = r.body?.connector?.id; const wurl = r.body?.webhookUrl || (location.origin + '/webhook/' + id);
+    $('connmodal').classList.add('hide'); $('conn-out').classList.remove('hide');
+    $('conn-out').innerHTML = '<p class="hint">接入点已创建。Webhook URL：</p><p><span class="code" style="font-size:13px;word-break:break-all">'+esc(wurl)+'</span></p>'
+      + (r.body?.secret ? '<p class="hint">Secret（只显示这一次，务必保存）：</p><p><span class="code" style="font-size:13px;word-break:break-all">'+esc(r.body.secret)+'</span></p>' : '');
+    showApp();
+  } else { $('connmodal-err').textContent = '创建失败：' + esc(r.body?.error || r.status); }
 };
 
 $('btn-start').onclick = async () => {
