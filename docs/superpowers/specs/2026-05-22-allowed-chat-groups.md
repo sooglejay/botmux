@@ -1,5 +1,11 @@
 # allowedChatGroups Spec
 
+> ⚠️ **已被取代（superseded）**：本 spec 描述的是初版"启动解析群成员快照"实现（member-snapshot）。
+> 后续统一为 **chatId-based talk**：`allowedChatGroups` 现在是"talk-open 的 chat_id 列表"，
+> `canTalk` 直接判断当前消息所在 chat 是否在列表中——不再解析/缓存成员，因此新人进群即生效、
+> 退群即失权、无需重启。运行时入口为 owner 的 `/grant`（不带 @ 即整群）。下文的成员解析/快照/
+> `resolveAllowedChatGroups`/`listChatMemberOpenIds` 等细节已不再适用，仅作历史记录。
+
 ## Overview
 
 本功能为 botmux 增加 `allowedChatGroups` 配置字段，把一个或多个飞书群聊作为“成员授权源”。daemon 启动时用当前 bot 的 Lark App 视角拉取这些群聊的成员 open_id 并缓存；缓存命中的用户获得普通使用权限，可在群聊、话题或私聊入口向 bot 提问或继续会话。敏感操作权限不变，仍只由 `allowedUsers` 控制。

@@ -19,7 +19,7 @@ import { parseEventMessage, resolveNonsupportMessage, stripLeadingMentions, type
 import { expandMergeForward } from './im/lark/merge-forward.js';
 import { buildQuoteHint } from './im/lark/quote-hint.js';
 import { logger } from './utils/logger.js';
-import { resolveAllowedChatGroups } from './services/allowed-chat-groups.js';
+import { checkAllowedChatGroupsConfig } from './services/allowed-chat-groups.js';
 import { ensureCjkFontsInstalled } from './utils/font-installer.js';
 import { invalidWorkingDirs } from './utils/working-dir.js';
 import type { DaemonToWorker, LarkMessage } from './types.js';
@@ -2348,7 +2348,7 @@ export async function startDaemon(botIndex?: number): Promise<void> {
       try { writeDaemonDescriptor(desc); } catch { /* best effort */ }
     }
 
-    await resolveAllowedChatGroups(bot);
+    checkAllowedChatGroupsConfig(bot);
 
     // Probe bot open_id and persist to bots-info.json. When the friendly
     // botName comes back from /bot/v3/info, refresh the dashboard descriptor

@@ -638,10 +638,10 @@ async function promptEditBotConfig(
   ]);
   input.allowedUsers = await ask(rl, `允许的用户 [${formatOptionalValue(bot.allowedUsers)}]: `);
 
-  printInputHelp('允许的群聊组', [
-    '可选。把飞书群聊作为成员授权源，群内成员获得普通使用权限；多个 chat_id 用逗号分隔。',
-    '值通常是 oc_xxx；留空保留当前值；输入 - 清空。',
-    '群成员授权不授予 /restart、/close、终端写入等敏感操作权限。',
+  printInputHelp('可对话群', [
+    '可选。在这些群里任何成员都能与机器人对话（按消息所在群判断，新人进群即生效、退群即失权，无需重启）；多个 chat_id 用逗号分隔。',
+    '值通常是 oc_xxx；留空保留当前值；输入 - 清空。等价于 owner 在该群发 /grant（不带 @）。',
+    '仅授对话权，不授予 /restart、/close、终端写入等敏感操作（那些仍由 allowedUsers 控制）。',
   ]);
   input.allowedChatGroups = await ask(rl, `允许的群聊组 [${formatOptionalValue(bot.allowedChatGroups)}]: `);
 

@@ -16,8 +16,11 @@ vi.mock('../src/im/lark/client.js', async (importOriginal) => {
   return { ...actual, replyMessage: (...a: any[]) => replyMock(...a) };
 });
 
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { parseGrantTarget, tryHandleGrantCommand } from '../src/im/lark/grant-command.js';
-import { registerBot, getBot } from '../src/bot-registry.js';
+import { registerBot, getBot, loadBotConfigs } from '../src/bot-registry.js';
 import * as pending from '../src/im/lark/grant-pending.js';
 
 describe('parseGrantTarget', () => {
@@ -86,5 +89,60 @@ describe('tryHandleGrantCommand (@bot /grant @user)', () => {
   it('unrelated message is not intercepted', async () => {
     const msg = { message_id: 'om_y', chat_id: 'oc_1', content: JSON.stringify({ text: '@_user_1 帮我看下代码' }), mentions: [{ key: '@_user_1', id: { open_id: 'ou_bot' }, name: 'Claude' }] };
     expect(await tryHandleGrantCommand('b1', msg, 'ou_owner')).toBe(false);
+  });
+});
+
+describe('tryHandleGrantCommand whole-chat grant (@bot /grant, no target)', () => {
+  let configPath: string;
+
+  beforeEach(() => {
+    replyMock.mockClear();
+    pending._resetForTest();
+    const dir = mkdtempSync(join(tmpdir(), 'botmux-grant-cmd-'));
+    configPath = join(dir, 'bots.json');
+    process.env.BOTS_CONFIG = configPath;
+    writeFileSync(configPath, JSON.stringify([
+      { larkAppId: 'b2', larkAppSecret: 's', cliId: 'claude-code', allowedUsers: ['ou_owner'] },
+    ], null, 2), 'utf-8');
+    loadBotConfigs().forEach(c => registerBot(c));
+    const bot = getBot('b2');
+    bot.botOpenId = 'ou_bot';
+    bot.resolvedAllowedUsers = ['ou_owner'];
+  });
+  afterEach(() => { delete process.env.BOTS_CONFIG; vi.restoreAllMocks(); });
+
+  // only the bot is @mentioned, no human target → whole-chat grant
+  const bareMsg = (text: string, chatId = 'oc_room') => ({
+    message_id: 'om_b', chat_id: chatId,
+    content: JSON.stringify({ text: `@_user_1 ${text}` }),
+    mentions: [{ key: '@_user_1', id: { open_id: 'ou_bot' }, name: 'Claude' }],
+  });
+
+  it('owner: bare /grant opens the whole chat to talk + replies (no card)', async () => {
+    const handled = await tryHandleGrantCommand('b2', bareMsg('/grant'), 'ou_owner');
+    expect(handled).toBe(true);
+    expect(getBot('b2').config.allowedChatGroups).toEqual(['oc_room']);
+    const [, , , msgType] = replyMock.mock.calls.at(-1)!;
+    expect(msgType ?? 'text').not.toBe('interactive');
+  });
+
+  it('owner: "/grant all" is also treated as whole-chat grant', async () => {
+    const handled = await tryHandleGrantCommand('b2', bareMsg('/grant all'), 'ou_owner');
+    expect(handled).toBe(true);
+    expect(getBot('b2').config.allowedChatGroups).toEqual(['oc_room']);
+  });
+
+  it('owner: bare /revoke removes the whole-chat grant', async () => {
+    await tryHandleGrantCommand('b2', bareMsg('/grant'), 'ou_owner');
+    expect(getBot('b2').config.allowedChatGroups).toEqual(['oc_room']);
+    const handled = await tryHandleGrantCommand('b2', bareMsg('/revoke'), 'ou_owner');
+    expect(handled).toBe(true);
+    expect(getBot('b2').config.allowedChatGroups ?? []).toEqual([]);
+  });
+
+  it('non-owner: bare /grant is rejected, chat not opened', async () => {
+    const handled = await tryHandleGrantCommand('b2', bareMsg('/grant'), 'ou_intruder');
+    expect(handled).toBe(true);
+    expect(getBot('b2').config.allowedChatGroups ?? []).toEqual([]);
   });
 });

@@ -9,7 +9,7 @@ import { isBotMentioned, extractMessageTextForRouting } from './event-dispatcher
 import { stripLeadingMentions } from './message-parser.js';
 import { buildGrantCard } from './card-builder.js';
 import { openPending } from './grant-pending.js';
-import { revokeGrant } from '../../services/grant-store.js';
+import { revokeGrant, addAllowedChatGroup, removeAllowedChatGroup } from '../../services/grant-store.js';
 import { replyMessage } from './client.js';
 import { localeForBot, t } from '../../i18n/index.js';
 import { logger } from '../../utils/logger.js';
@@ -49,9 +49,30 @@ export async function tryHandleGrantCommand(
   }
 
   const target = parseGrantTarget(message, getBotOpenId(larkAppId));
+
+  // 无 @目标（裸 `/grant`、`/grant all`、裸 `/revoke`）→ 整群 talk 授权：把当前 chat 加入/移出
+  // allowedChatGroups（chatId 级 talk-open，仅 canTalk，不授 canOperate）。
   if (!target) {
-    await replyMessage(larkAppId, messageId, JSON.stringify({ text: t(isGrant ? 'cmd.grant.usage' : 'cmd.revoke.usage', undefined, loc) }))
-      .catch(err => logger.debug(`grant usage reply failed: ${err}`));
+    if (!chatId) {
+      await replyMessage(larkAppId, messageId, JSON.stringify({ text: t(isGrant ? 'cmd.grant.usage' : 'cmd.revoke.usage', undefined, loc) }))
+        .catch(err => logger.debug(`grant usage reply failed: ${err}`));
+      return true;
+    }
+    let txt: string;
+    if (isGrant) {
+      const r = await addAllowedChatGroup(larkAppId, chatId);
+      txt = !r.ok
+        ? t('cmd.grant.chat_failed', { reason: r.reason }, loc)
+        : r.created ? t('cmd.grant.chat_done', undefined, loc) : t('cmd.grant.chat_already', undefined, loc);
+    } else {
+      const r = await removeAllowedChatGroup(larkAppId, chatId);
+      txt = !r.ok
+        ? t('cmd.revoke.chat_failed', { reason: r.reason }, loc)
+        : r.removed ? t('cmd.revoke.chat_done', undefined, loc) : t('cmd.revoke.chat_none', undefined, loc);
+    }
+    await replyMessage(larkAppId, messageId, JSON.stringify({ text: txt }))
+      .catch(err => logger.debug(`grant whole-chat reply failed: ${err}`));
+    logger.info(`[grant:${larkAppId}] ${isGrant ? 'grant' : 'revoke'} whole-chat ${chatId}`);
     return true;
   }
 

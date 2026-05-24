@@ -57,9 +57,9 @@ describe('card-handler grant actions', () => {
 
   it('stale nonce → expired toast, no grant', async () => {
     const { registry, handler } = await fresh();
-    const res = await handler.handleCardAction(action('grant_global', { nonce: 'stale' }), deps, 'h1');
+    const res = await handler.handleCardAction(action('grant_chat', { nonce: 'stale' }), deps, 'h1');
     expect(res?.toast?.type).toBe('error');
-    expect(registry.getBot('h1').resolvedAllowedUsers).not.toContain('ou_g');
+    expect(registry.getBot('h1').config.chatGrants).toBeUndefined();
   });
 
   it('owner grant_chat WITH card id → @notify + withdraw + persists, returns nothing', async () => {
@@ -80,13 +80,6 @@ describe('card-handler grant actions', () => {
     expect(res?.elements).toBeTruthy();           // raw card body (dispatcher wraps as patch)
     expect(deleteMock).not.toHaveBeenCalled();
     expect(registry.getBot('h1').config.chatGrants).toEqual({ oc_1: ['ou_g'] });
-  });
-
-  it('grant_global persists to resolvedAllowedUsers', async () => {
-    const { registry, pending, handler } = await fresh();
-    const nonce = pending.openPending('h1', 'oc_1', 'ou_g');
-    await handler.handleCardAction(action('grant_global', { nonce }, 'om_card'), deps, 'h1');
-    expect(registry.getBot('h1').resolvedAllowedUsers).toContain('ou_g');
   });
 
   it('withdraw returns false (swallowed SDK error) → fallback patch, still persisted', async () => {

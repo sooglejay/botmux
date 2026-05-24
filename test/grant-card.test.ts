@@ -14,15 +14,16 @@ describe('buildGrantCard', () => {
     const actions = card.elements.find((e: any) => e.tag === 'action').actions;
     const byAction = Object.fromEntries(actions.map((a: any) => [a.value.action, a.value]));
     expect(byAction.grant_chat).toMatchObject({ target_open_id: 'ou_g', chat_id: 'oc_1', nonce: 'n1' });
-    expect(byAction.grant_global).toMatchObject({ target_open_id: 'ou_g', chat_id: 'oc_1', nonce: 'n1' });
     expect(byAction.grant_deny).toMatchObject({ target_open_id: 'ou_g', chat_id: 'oc_1', nonce: 'n1' });
+    // talk-only: the operate-granting "global" button is gone.
+    expect(byAction.grant_global).toBeUndefined();
   });
 
-  it('owner mode renders without crashing and still carries actions', () => {
+  it('owner mode renders without crashing and carries exactly the talk + deny actions', () => {
     const card = JSON.parse(buildGrantCard(
       { ownerOpenId: 'ou_o', requesterOpenId: 'ou_g', requesterName: 'Bob', chatId: 'oc_2', nonce: 'n2', mode: 'owner' }, 'en',
     ));
-    expect(card.elements.find((e: any) => e.tag === 'action').actions).toHaveLength(3);
+    expect(card.elements.find((e: any) => e.tag === 'action').actions).toHaveLength(2);
   });
 
   it('buildGrantResultCard has no buttons', () => {

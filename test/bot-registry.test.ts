@@ -84,12 +84,6 @@ describe('registerBot', () => {
     expect(state.resolvedAllowedUsers).toEqual([]);
   });
 
-  it('should set resolvedAllowedChatGroupUsers empty by default', () => {
-    const cfg = makeCfg();
-    const state = mod.registerBot(cfg);
-    expect(state.resolvedAllowedChatGroupUsers).toEqual([]);
-  });
-
   it('should make the bot retrievable by appId', () => {
     const cfg = makeCfg();
     mod.registerBot(cfg);

@@ -565,7 +565,6 @@ describe('Card integration: full event flow', () => {
       vi.mocked(botRegMod.getAllBots).mockReturnValueOnce([{
         config: { larkAppId: APP_ID, larkAppSecret: 'secret', cliId: 'claude-code', allowedChatGroups: ['oc_team'] } as any,
         resolvedAllowedUsers: [],
-        resolvedAllowedChatGroupUsers: ['ou_user'],
         botOpenId: 'ou_bot',
       } as any]);
 

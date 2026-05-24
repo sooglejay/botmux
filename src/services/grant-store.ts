@@ -23,27 +23,6 @@ function resolvedAfterRemoval(larkAppId: string, openId: string): string[] {
   return getBot(larkAppId).resolvedAllowedUsers.filter(u => u !== openId);
 }
 
-export async function addGlobalGrant(
-  larkAppId: string, openId: string,
-): Promise<{ ok: true; created: boolean } | Fail> {
-  let bot; try { bot = getBot(larkAppId); } catch { return { ok: false, reason: 'bot_not_registered' }; }
-  const r = await rmwBotEntry<{ created: boolean }>(larkAppId, (entry) => {
-    const cur: string[] = Array.isArray(entry.allowedUsers) ? entry.allowedUsers : [];
-    const created = !cur.includes(openId);
-    if (created) cur.push(openId);
-    entry.allowedUsers = cur;
-    return { write: created, result: { created } };
-  });
-  if (!r.ok) return r;
-  if (r.result.created) {
-    bot.config.allowedUsers = [...(bot.config.allowedUsers ?? []), openId];
-    if (!bot.resolvedAllowedUsers.includes(openId)) bot.resolvedAllowedUsers.push(openId);
-    bot.rawAllowedUserResolution.set(openId, openId);
-    logger.info(`[grant:${larkAppId}] +global ${openId}`);
-  }
-  return { ok: true, created: r.result.created };
-}
-
 export async function addChatGrant(
   larkAppId: string, chatId: string, openId: string,
 ): Promise<{ ok: true; created: boolean } | Fail> {
@@ -64,6 +43,52 @@ export async function addChatGrant(
     logger.info(`[grant:${larkAppId}] +chat ${chatId} ${openId}`);
   }
   return { ok: true, created: r.result.created };
+}
+
+/**
+ * 整群 talk 授权：把 chatId 加入 allowedChatGroups（"talk-open 的 chat_id 列表"）。
+ * 命中后该 chat 任何成员都过 canTalk（见 event-dispatcher.canTalk），不授 canOperate。
+ */
+export async function addAllowedChatGroup(
+  larkAppId: string, chatId: string,
+): Promise<{ ok: true; created: boolean } | Fail> {
+  let bot; try { bot = getBot(larkAppId); } catch { return { ok: false, reason: 'bot_not_registered' }; }
+  const r = await rmwBotEntry<{ created: boolean }>(larkAppId, (entry) => {
+    const cur: string[] = Array.isArray(entry.allowedChatGroups) ? entry.allowedChatGroups : [];
+    const created = !cur.includes(chatId);
+    if (created) cur.push(chatId);
+    entry.allowedChatGroups = cur;
+    return { write: created, result: { created } };
+  });
+  if (!r.ok) return r;
+  if (r.result.created) {
+    bot.config.allowedChatGroups = [...(bot.config.allowedChatGroups ?? []), chatId];
+    logger.info(`[grant:${larkAppId}] +chatGroup ${chatId}`);
+  }
+  return { ok: true, created: r.result.created };
+}
+
+/** 撤销整群 talk 授权：把 chatId 从 allowedChatGroups 移除。 */
+export async function removeAllowedChatGroup(
+  larkAppId: string, chatId: string,
+): Promise<{ ok: true; removed: boolean } | Fail> {
+  let bot; try { bot = getBot(larkAppId); } catch { return { ok: false, reason: 'bot_not_registered' }; }
+  const r = await rmwBotEntry<{ removed: boolean }>(larkAppId, (entry) => {
+    const cur: string[] = Array.isArray(entry.allowedChatGroups) ? entry.allowedChatGroups : [];
+    const removed = cur.includes(chatId);
+    const next = cur.filter((c: string) => c !== chatId);
+    if (next.length > 0) entry.allowedChatGroups = next;
+    else delete entry.allowedChatGroups;
+    return { write: removed, result: { removed } };
+  });
+  if (!r.ok) return r;
+  if (r.result.removed) {
+    const next = (bot.config.allowedChatGroups ?? []).filter(c => c !== chatId);
+    if (next.length > 0) bot.config.allowedChatGroups = next;
+    else delete bot.config.allowedChatGroups;
+    logger.info(`[grant:${larkAppId}] -chatGroup ${chatId}`);
+  }
+  return { ok: true, removed: r.result.removed };
 }
 
 /**

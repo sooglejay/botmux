@@ -1,30 +1,22 @@
 import type { BotState } from '../bot-registry.js';
-import { listChatMemberOpenIds } from '../im/lark/client.js';
 import { hasOwnerEntry } from '../setup/bot-config-editor.js';
 import { logger } from '../utils/logger.js';
 
-export async function resolveAllowedChatGroups(bot: BotState): Promise<void> {
+/**
+ * allowedChatGroups 现在是"talk-open 的 chat_id 列表"（见 event-dispatcher.canTalk）：
+ * 当前消息来自其中之一即放行 canTalk，成员关系隐含在"能在该 chat 发言"里，
+ * 因此不再启动时解析群成员、不存快照（退群者发不了言自动失权、新人进群即生效）。
+ *
+ * 这里只做一次配置校验：配了群授权却没 owner 时告警 —— 群成员能对话，但 operate
+ * 对所有人关闭（含 owner）。setup 已拦交互式配置，这里兜底手动改 bots.json 的情况。
+ */
+export function checkAllowedChatGroupsConfig(bot: BotState): void {
   const chatIds = bot.config.allowedChatGroups ?? [];
   if (chatIds.length === 0) return;
-
-  // 兜底手动编辑 bots.json 绕过 setup 校验的情况：配了 allowedChatGroups 却没 owner，
-  // 群成员只拿到 canTalk，敏感操作对所有人关闭（含 owner）。setup 已拦，这里只补一条 warn。
   if (!hasOwnerEntry(bot.config.allowedUsers)) {
     logger.warn(
       `[${bot.config.larkAppId}] allowedChatGroups 已配置但 allowedUsers 无 owner（完整邮箱或 open_id）: ` +
       `群成员可对话，但 /restart、/close、/grant 等敏感操作将对所有人不可用。请在 allowedUsers 配置至少一个 owner。`,
     );
   }
-
-  const resolved = new Set<string>();
-  for (const chatId of chatIds) {
-    try {
-      const members = await listChatMemberOpenIds(bot.config.larkAppId, chatId);
-      for (const openId of members) resolved.add(openId);
-      logger.info(`[${bot.config.larkAppId}] Resolved allowedChatGroups ${chatId}: ${members.length} member(s)`);
-    } catch (err: any) {
-      logger.warn(`[${bot.config.larkAppId}] Failed to resolve allowedChatGroups ${chatId}: ${err?.message ?? err}`);
-    }
-  }
-  bot.resolvedAllowedChatGroupUsers = [...resolved];
 }

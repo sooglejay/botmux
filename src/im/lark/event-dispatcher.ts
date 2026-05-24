@@ -497,12 +497,14 @@ export function canTalk(larkAppId: string, chatId: string | undefined, senderOpe
   if (isKnownPeerBot(config.session.dataDir, larkAppId, senderOpenId)) return true;
   if (hasChatGrant(larkAppId, chatId, senderOpenId)) return true;
   const bot = getBot(larkAppId);
+  // allowedChatGroups 是"talk-open 的 chat_id 列表"：当前消息来自其中之一即放行（仅 canTalk）。
+  // 成员关系隐含在"能在该 chat 发言"里 —— 退群者发不了言自动失权，新人进群即生效，无需成员快照。
+  if (chatId && bot.config.allowedChatGroups?.includes(chatId)) return true;
   const allowedUsers = bot.resolvedAllowedUsers;
-  const allowedChatGroupUsers = bot.resolvedAllowedChatGroupUsers;
   const hasAllowlist = allowedUsers.length > 0 || (bot.config.allowedChatGroups?.length ?? 0) > 0;
   if (!hasAllowlist) return true;
   if (!senderOpenId) return false;
-  return allowedUsers.includes(senderOpenId) || allowedChatGroupUsers.includes(senderOpenId);
+  return allowedUsers.includes(senderOpenId);
 }
 
 export function canOperate(larkAppId: string, _chatId: string | undefined, senderOpenId: string | undefined): boolean {

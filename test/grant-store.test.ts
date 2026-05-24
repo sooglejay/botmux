@@ -85,12 +85,27 @@ describe('grant-store', () => {
     expect(bot.resolvedAllowedUsers).toEqual(['ou_owner']);
   });
 
-  it('addGlobalGrant persists, dedups, syncs resolved + resolution map', async () => {
+  it('addAllowedChatGroup persists the chat_id & syncs in-memory; idempotent', async () => {
     writeConfig({ allowedUsers: ['ou_owner'] });
     const { registry, store } = await freshModules();
-    expect(await store.addGlobalGrant('a1', 'ou_new')).toEqual({ ok: true, created: true });
-    expect(readConfig().allowedUsers).toEqual(['ou_owner', 'ou_new']);
-    expect(registry.getBot('a1').resolvedAllowedUsers).toContain('ou_new');
-    expect(await store.addGlobalGrant('a1', 'ou_new')).toEqual({ ok: true, created: false });
+    const r = await store.addAllowedChatGroup('a1', 'oc_team');
+    expect(r).toEqual({ ok: true, created: true });
+    expect(readConfig().allowedChatGroups).toEqual(['oc_team']);
+    expect(registry.getBot('a1').config.allowedChatGroups).toEqual(['oc_team']);
+    // idempotent
+    expect(await store.addAllowedChatGroup('a1', 'oc_team')).toEqual({ ok: true, created: false });
+    expect(readConfig().allowedChatGroups).toEqual(['oc_team']);
   });
+
+  it('removeAllowedChatGroup removes the chat_id from disk & memory', async () => {
+    writeConfig({ allowedUsers: ['ou_owner'], allowedChatGroups: ['oc_team', 'oc_other'] });
+    const { registry, store } = await freshModules();
+    const r = await store.removeAllowedChatGroup('a1', 'oc_team');
+    expect(r).toEqual({ ok: true, removed: true });
+    expect(readConfig().allowedChatGroups).toEqual(['oc_other']);
+    expect(registry.getBot('a1').config.allowedChatGroups).toEqual(['oc_other']);
+    // removing one that isn't there
+    expect(await store.removeAllowedChatGroup('a1', 'oc_team')).toEqual({ ok: true, removed: false });
+  });
+
 });

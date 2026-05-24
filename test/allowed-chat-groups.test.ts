@@ -1,64 +1,39 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-const mockListChatMemberOpenIds = vi.fn();
-
-vi.mock('../src/im/lark/client.js', () => ({
-  listChatMemberOpenIds: (...args: any[]) => mockListChatMemberOpenIds(...args),
-}));
-
+const mockWarn = vi.fn();
 vi.mock('../src/utils/logger.js', () => ({
-  logger: { info: vi.fn(), debug: vi.fn(), warn: vi.fn(), error: vi.fn() },
+  logger: { info: vi.fn(), debug: vi.fn(), warn: (...a: any[]) => mockWarn(...a), error: vi.fn() },
 }));
 
-import { resolveAllowedChatGroups } from '../src/services/allowed-chat-groups.js';
+import { checkAllowedChatGroupsConfig } from '../src/services/allowed-chat-groups.js';
 
-describe('resolveAllowedChatGroups', () => {
-  beforeEach(() => mockListChatMemberOpenIds.mockReset());
+function makeBot(over: any = {}) {
+  return {
+    config: {
+      larkAppId: 'app_a',
+      larkAppSecret: 'secret',
+      cliId: 'claude-code' as const,
+      ...over,
+    },
+  } as any;
+}
 
-  it('resolves configured chat groups into a de-duplicated startup snapshot', async () => {
-    mockListChatMemberOpenIds
-      .mockResolvedValueOnce(['ou_a', 'ou_b'])
-      .mockResolvedValueOnce(['ou_b', 'ou_c']);
-    const bot = {
-      config: {
-        larkAppId: 'app_a',
-        larkAppSecret: 'secret',
-        cliId: 'claude-code' as const,
-        allowedChatGroups: ['oc_team', 'oc_project'],
-      },
-      client: {} as any,
-      resolvedAllowedUsers: ['ou_admin'],
-      resolvedAllowedChatGroupUsers: [],
-    };
+describe('checkAllowedChatGroupsConfig', () => {
+  beforeEach(() => mockWarn.mockReset());
 
-    await resolveAllowedChatGroups(bot);
-
-    expect(mockListChatMemberOpenIds).toHaveBeenNthCalledWith(1, 'app_a', 'oc_team');
-    expect(mockListChatMemberOpenIds).toHaveBeenNthCalledWith(2, 'app_a', 'oc_project');
-    expect(bot.resolvedAllowedChatGroupUsers).toEqual(['ou_a', 'ou_b', 'ou_c']);
-    expect(bot.resolvedAllowedUsers).toEqual(['ou_admin']);
+  it('warns when allowedChatGroups is set but allowedUsers has no owner', () => {
+    checkAllowedChatGroupsConfig(makeBot({ allowedChatGroups: ['oc_team'], allowedUsers: [] }));
+    expect(mockWarn).toHaveBeenCalledOnce();
   });
 
-  it('skips failed groups without granting their members or blocking successful groups', async () => {
-    mockListChatMemberOpenIds
-      .mockRejectedValueOnce(new Error('denied'))
-      .mockResolvedValueOnce(['ou_ok']);
-    const bot = {
-      config: {
-        larkAppId: 'app_a',
-        larkAppSecret: 'secret',
-        cliId: 'claude-code' as const,
-        allowedChatGroups: ['oc_denied', 'oc_ok'],
-      },
-      client: {} as any,
-      resolvedAllowedUsers: [],
-      resolvedAllowedChatGroupUsers: ['ou_stale'],
-    };
+  it('does not warn when an owner exists in allowedUsers', () => {
+    checkAllowedChatGroupsConfig(makeBot({ allowedChatGroups: ['oc_team'], allowedUsers: ['ou_admin'] }));
+    expect(mockWarn).not.toHaveBeenCalled();
+  });
 
-    await resolveAllowedChatGroups(bot);
-
-    expect(mockListChatMemberOpenIds).toHaveBeenNthCalledWith(1, 'app_a', 'oc_denied');
-    expect(mockListChatMemberOpenIds).toHaveBeenNthCalledWith(2, 'app_a', 'oc_ok');
-    expect(bot.resolvedAllowedChatGroupUsers).toEqual(['ou_ok']);
+  it('does not warn when allowedChatGroups is empty/absent', () => {
+    checkAllowedChatGroupsConfig(makeBot({}));
+    checkAllowedChatGroupsConfig(makeBot({ allowedChatGroups: [] }));
+    expect(mockWarn).not.toHaveBeenCalled();
   });
 });

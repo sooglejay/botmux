@@ -76,7 +76,6 @@ export interface BotState {
   botOpenId?: string;
   botName?: string;       // Lark app display name (from /bot/v3/info)
   resolvedAllowedUsers: string[];
-  resolvedAllowedChatGroupUsers: string[];
   /** raw allowedUsers 条目 → 解析后的 open_id。供 /revoke 反查并删除 email 形式的 raw 条目。 */
   rawAllowedUserResolution: Map<string, string>;
 }
@@ -125,7 +124,6 @@ export function registerBot(cfg: BotConfig): BotState {
     config: cfg,
     client,
     resolvedAllowedUsers: [...(cfg.allowedUsers ?? [])],
-    resolvedAllowedChatGroupUsers: [],
     rawAllowedUserResolution: new Map(),
   };
   bots.set(cfg.larkAppId, state);
