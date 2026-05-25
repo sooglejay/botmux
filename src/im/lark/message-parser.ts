@@ -476,6 +476,26 @@ function extractTextContent(msgType: string, rawContent: string, mentions?: RawE
 }
 
 /**
+ * botmux-generated card footer signature. Every card `botmux send` /
+ * buildMarkdownCard emits ends with a small grey note linking back to the repo
+ * (`[botmux](https://github.com/deepcoldy/botmux)`, optionally `· 发送给：@owner`).
+ * That footer is human-facing chrome — when another bot receives the card it
+ * must NOT leak into the receiving bot's prompt (it surfaces as a stray
+ * `<font color='grey'>botmux</font>` block and duplicates mention info). Both
+ * Lark render formats carry the canonical repo URL on that footer line (Format B
+ * as the markdown link target, Format A as the `<a href>`), so the URL is a
+ * reliable, format-agnostic marker. Anchored on the full repo URL so genuine
+ * body text merely mentioning "botmux" survives. Known, accepted trade-off: a
+ * card whose own body puts this exact repo URL on a line would lose that line
+ * too — vanishingly rare versus the value of a simple format-agnostic anchor.
+ */
+const BOTMUX_FOOTER_MARKER = 'github.com/deepcoldy/botmux';
+
+function isBotmuxFooterLine(line: string): boolean {
+  return line.includes(BOTMUX_FOOTER_MARKER);
+}
+
+/**
  * Extract human-readable text from an interactive card.
  *
  * Lark API returns card content in a **simplified format** (not the original card JSON):
@@ -565,7 +585,15 @@ function extractCardContent(rawContent: string, numberer?: ImgNumberer): string 
       }
     }
 
-    return parts.join('\n') || '[卡片]';
+    // Drop the botmux footer chrome so a receiving bot's prompt isn't polluted
+    // by the grey `botmux` badge / `发送给：@owner` line. Line-level (not
+    // part-level) so a footer never takes adjacent real content with it.
+    const cleaned = parts
+      .join('\n')
+      .split('\n')
+      .filter(line => !isBotmuxFooterLine(line))
+      .join('\n');
+    return cleaned || '[卡片]';
   } catch {
     return '[卡片]';
   }

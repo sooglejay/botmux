@@ -8,6 +8,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import { parseApiMessage, extractResources, parseEventMessage, stripLeadingMentions, createImgNumberer, cardContentHasUpgradeFallback, isPureCardUpgradeFallback, mergeCardText, wrapResolvedCardText, CARD_EMBEDDED_PLACEHOLDER } from '../src/im/lark/message-parser.js';
+import { buildMarkdownCard } from '../src/im/lark/md-card.js';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
 
@@ -250,6 +251,61 @@ describe('Interactive card parsing: Format B (original card JSON)', () => {
     const result = parseApiMessage(makeMsg('interactive', card));
     expect(result.content).toContain('Col 1');
     expect(result.content).toContain('Col 2');
+  });
+});
+
+// ─── botmux footer chrome filtering ───────────────────────────────────────
+
+describe('Interactive card parsing: botmux footer is stripped from prompt', () => {
+  it('drops the Format B grey footer element but keeps body', () => {
+    const card = {
+      body: { elements: [
+        { tag: 'markdown', content: '正文内容' },
+        { tag: 'hr' },
+        { tag: 'markdown', text_size: 'notation_small_v2',
+          content: "<font color='grey'>[botmux](https://github.com/deepcoldy/botmux) · 发送给：<at id=ou_owner></at></font>" },
+      ] },
+    };
+    const result = parseApiMessage(makeMsg('interactive', card));
+    expect(result.content).toContain('正文内容');
+    expect(result.content).not.toContain('botmux');
+    expect(result.content).not.toContain('发送给');
+  });
+
+  it('drops the Format A (API simplified) footer line', () => {
+    const card = {
+      elements: [
+        [{ tag: 'text', text: '正文内容' }],
+        [
+          { tag: 'a', text: 'botmux', href: 'https://github.com/deepcoldy/botmux' },
+          { tag: 'text', text: ' · 发送给：' },
+          { tag: 'at', user_name: 'Owner' },
+        ],
+      ],
+    };
+    const result = parseApiMessage(makeMsg('interactive', card));
+    expect(result.content).toContain('正文内容');
+    expect(result.content).not.toContain('botmux');
+  });
+
+  it('round-trips a real buildMarkdownCard output without footer leakage', () => {
+    const raw = buildMarkdownCard('帮我看下这个 bug', 'ou_owner');
+    const result = parseApiMessage(makeMsg('interactive', JSON.parse(raw)));
+    expect(result.content).toContain('帮我看下这个 bug');
+    expect(result.content).not.toContain('botmux');
+    expect(result.content).not.toContain('发送给');
+  });
+
+  it('keeps body text that merely mentions botmux without the repo link', () => {
+    // The filter anchors on the canonical repo URL, so genuine prose about
+    // botmux survives — only the footer chrome is removed.
+    const card = {
+      body: { elements: [
+        { tag: 'markdown', content: 'botmux 这个项目挺好用的' },
+      ] },
+    };
+    const result = parseApiMessage(makeMsg('interactive', card));
+    expect(result.content).toContain('botmux 这个项目挺好用的');
   });
 });
 
