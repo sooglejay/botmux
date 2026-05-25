@@ -2052,8 +2052,11 @@ async function handleThreadReply(data: any, ctx: RoutingContext): Promise<void> 
     const rootIdForStore = scope === 'thread' ? anchor : parsed.messageId;
     const session = sessionStore.createSession(autoCreateChatId, rootIdForStore, parsed.content.substring(0, 50), autoCreateChatType);
     const now = Date.now();
+    // Bot-started handoff sessions have no human owner; keeping the bot as
+    // owner makes daemon-generated footers wake that bot again.
+    const ownerOpenId = isForeignBot ? undefined : senderOId;
     session.larkAppId = larkAppId;
-    session.ownerOpenId = senderOId;
+    session.ownerOpenId = ownerOpenId;
     session.lastCallerOpenId = senderOId;
     session.lastMessageAt = new Date(now).toISOString();
     session.scope = scope;
@@ -2110,7 +2113,7 @@ async function handleThreadReply(data: any, ctx: RoutingContext): Promise<void> 
       pendingAttachments: attachments.length > 0 ? attachments : undefined,
       pendingMentions: parsed.mentions,
       pendingSender: autoCreateSender,
-      ownerOpenId: senderOId,
+      ownerOpenId,
       currentTurnTitle: parsed.content.substring(0, 50),
       workingDir: pinnedWorkingDir,
     };
