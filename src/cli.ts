@@ -2126,8 +2126,10 @@ botmux v${getVersion()} — IM ↔ AI 编程 CLI 桥接
        --card | --text                 强制卡片 / 纯文本（默认按 md 语法自动判断）
        --top-level                     发顶层消息（不回复进当前话题）
        --chat-id <oc_xxx>              指定目标群（默认当前话题所在群）
-    @ 硬门：普通群/话题群回复时须三选一 --mention/--mention-back/--no-mention，否则报错不发
-    （可设 BOTMUX_REQUIRE_MENTION_DECISION=false 关闭）
+    @ 硬门：每条回复须三选一 --mention/--mention-back/--no-mention，否则报错不发。
+    按内容价值选：有实质结论要对方看/确认/决策→--mention-back(或--mention点名)；
+    纯记录/低优先级进度/简短确认→--no-mention；没信息量的"收到"不如不发。
+    （可设 BOTMUX_REQUIRE_MENTION_DECISION=false 关闭硬门）
   bots list                            列出当前群聊中的机器人（含 open_id）
   history [--limit N] [--scope session|thread|chat|ambient]
                                        拉取当前会话的消息历史 (JSON)。默认按 session scope：话题/话题群 → 话题内，普通群 → 整群；
@@ -2663,7 +2665,6 @@ async function cmdSend(rest: string[]): Promise<void> {
     mentionBack,
     noMention,
     hasQuoteTargetSender: !!s.quoteTargetSenderOpenId,
-    quoteTargetSenderIsBot: s.quoteTargetSenderIsBot,
   });
   if (!mentionGate.ok) { console.error(mentionGate.error); process.exit(2); }
 

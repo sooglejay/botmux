@@ -47,10 +47,6 @@ export interface MentionDecisionArgs {
   noMention: boolean;
   /** whether the session knows who sent the message being replied to */
   hasQuoteTargetSender: boolean;
-  /** the quote-target sender is a bot (vs a human) */
-  quoteTargetSenderIsBot?: boolean;
-  /** display name of the quote-target sender, if known */
-  quoteTargetSenderName?: string;
 }
 
 export interface MentionDecisionResult {
@@ -78,22 +74,10 @@ export function validateMentionDecision(args: MentionDecisionArgs): MentionDecis
   const decided = args.hasMentionArgs || args.mentionBack || args.noMention;
   if (decided) return { ok: true };
 
-  // No decision made — guide based on who is being replied to.
-  if (!args.hasQuoteTargetSender) {
-    return {
-      ok: false,
-      error: '本条未指定 @ 决策。请三选一：--mention <ou:Name>（点名）/ --mention-back（@回触发者）/ --no-mention（明确不@）。',
-    };
-  }
-  if (args.quoteTargetSenderIsBot) {
-    const who = args.quoteTargetSenderName ? ` bot「${args.quoteTargetSenderName}」` : ' bot';
-    return {
-      ok: false,
-      error: `你正在回复${who}。想让对方接力就 --mention-back（或 --mention <ou:Name>）；纯记录、不想触发对方就 --no-mention（避免循环 @ 空转）。`,
-    };
-  }
+  // No decision made — guide by message VALUE (not by human-vs-bot). Avoid
+  // letting --no-mention become the lazy default, and avoid meaningless @.
   return {
     ok: false,
-    error: '你正在回复人。回复人必须 @：加 --mention-back（@回触发者）。若确实不需要通知可加 --no-mention。',
+    error: '本条需显式 @ 决策（别把 --no-mention 当默认）：有实质结论、要对方继续看/确认/决策 → --mention-back（或 --mention <ou:Name> 点名）；纯记录/低优先级进度/简短确认 → --no-mention；若只是没信息量的"收到"，不如不发，等有内容再回。',
   };
 }

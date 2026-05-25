@@ -38,7 +38,6 @@ describe('validateMentionDecision', () => {
     mentionBack: false,
     noMention: false,
     hasQuoteTargetSender: true,
-    quoteTargetSenderIsBot: false,
   };
 
   it('passes when --mention given', () => {
@@ -53,23 +52,12 @@ describe('validateMentionDecision', () => {
     expect(validateMentionDecision({ ...base, noMention: true }).ok).toBe(true);
   });
 
-  it('fails (no decision) replying to a human with human-specific hint', () => {
-    const r = validateMentionDecision({ ...base, quoteTargetSenderIsBot: false });
+  it('fails (no decision) with content-based guidance (not human-vs-bot)', () => {
+    const r = validateMentionDecision({ ...base });
     expect(r.ok).toBe(false);
-    expect(r.error).toContain('回复人必须 @');
-  });
-
-  it('fails (no decision) replying to a bot with bot-specific hint', () => {
-    const r = validateMentionDecision({ ...base, quoteTargetSenderIsBot: true, quoteTargetSenderName: 'Codex' });
-    expect(r.ok).toBe(false);
-    expect(r.error).toContain('Codex');
-    expect(r.error).toContain('循环');
-  });
-
-  it('fails (no decision) with generic hint when no sender known', () => {
-    const r = validateMentionDecision({ ...base, hasQuoteTargetSender: false });
-    expect(r.ok).toBe(false);
-    expect(r.error).toContain('三选一');
+    expect(r.error).toContain('实质结论');
+    expect(r.error).toContain('--mention-back');
+    expect(r.error).toContain('--no-mention');
   });
 
   it('rejects --no-mention combined with --mention', () => {
