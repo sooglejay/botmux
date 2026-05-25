@@ -15,9 +15,13 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { config } from '../config.js';
 import { jsonRes } from './workflow-api.js';
 import { buildTeamRoster } from '../services/team-roster.js';
-import { getDeploymentIdentity } from '../services/deployment-identity.js';
+import { buildFederatedRoster } from '../services/federation-roster.js';
+import { getDeploymentIdentity, setDeploymentName } from '../services/deployment-identity.js';
 import { addMembership, listMemberships, removeMembership } from '../services/federation-membership-store.js';
 import type { FederatedBot } from '../services/federation-store.js';
+import { ensureDefaultTeam, DEFAULT_TEAM_ID } from '../services/team-store.js';
+import { createInvite } from '../services/invite-store.js';
+import { loadBotConfigs } from '../bot-registry.js';
 
 const HUB_TIMEOUT_MS = 8000;
 
@@ -65,6 +69,11 @@ function normalizeHubUrl(raw: string): string | null {
   return s;
 }
 
+/** bots.json (config) order of larkAppIds, so federated rosters match the dashboard. */
+function botConfigOrder(): string[] {
+  try { return loadBotConfigs().map(b => b.larkAppId); } catch { return []; }
+}
+
 /** This deployment's bots, in the shape the hub federates (bots.json order). */
 function localBots(dataDir: string): FederatedBot[] {
   return buildTeamRoster(dataDir).bots.map(b => ({
@@ -106,11 +115,35 @@ export async function handleFederationSpokeApi(
   deps: FederationSpokeDeps = {},
 ): Promise<boolean> {
   const path = url.pathname;
-  if (path !== '/api/team/join-remote' && path !== '/api/team/remote-roster'
-    && path !== '/api/team/sync-remote' && path !== '/api/team/leave-remote') return false;
+  const LOCAL = new Set(['/api/team/local', '/api/team/local-invite', '/api/team/rename-deployment']);
+  const REMOTE = new Set(['/api/team/join-remote', '/api/team/remote-roster', '/api/team/sync-remote', '/api/team/leave-remote']);
+  if (!LOCAL.has(path) && !REMOTE.has(path)) return false;
   const dataDir = deps.dataDir ?? config.session.dataDir;
   const fetcher = deps.fetcher ?? fetch;
   const method = req.method ?? 'GET';
+
+  // ── Local team (this deployment as a Hub: identity + own roster + invites) ──
+  if (path === '/api/team/local' && method === 'GET') {
+    ensureDefaultTeam(dataDir);
+    const me = getDeploymentIdentity(dataDir);
+    const suggestedHubUrl = `http://${config.dashboard.externalHost}:${config.dashboard.port}`;
+    jsonRes(res, 200, { ok: true, deployment: me, suggestedHubUrl, ...buildFederatedRoster(dataDir, DEFAULT_TEAM_ID, botConfigOrder()) });
+    return true;
+  }
+  if (path === '/api/team/local-invite' && method === 'POST') {
+    ensureDefaultTeam(dataDir);
+    const inv = createInvite(dataDir, DEFAULT_TEAM_ID, getDeploymentIdentity(dataDir).deploymentId);
+    jsonRes(res, 200, { ok: true, code: inv.code, expiresAt: inv.expiresAt });
+    return true;
+  }
+  if (path === '/api/team/rename-deployment' && method === 'POST') {
+    let body: any;
+    try { body = await readBody(req); } catch { jsonRes(res, 400, { ok: false, error: 'bad_json' }); return true; }
+    const name = String(body?.name ?? '').trim();
+    if (!name) { jsonRes(res, 400, { ok: false, error: 'name_required' }); return true; }
+    jsonRes(res, 200, { ok: true, deployment: setDeploymentName(dataDir, name) });
+    return true;
+  }
 
   // Accept an invite from another deployment's hub: register our bots there.
   if (path === '/api/team/join-remote' && method === 'POST') {

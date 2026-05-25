@@ -77,20 +77,28 @@ interface RemoteMembership {
 
 ### Hub 侧（挂在 dashboard，**在 token 网关之前**，跨部署可达；用邀请码/syncToken 自鉴权）
 - `POST /api/federation/join` — `{ inviteCode, deployment:{deploymentId,name,bots[]} }`
-  → 校验并消费邀请码（→teamId）；记录该部署；换发 `syncToken`；回 `{ ok, teamId, teamName, syncToken }`。
+  → 校验并消费邀请码（→teamId）；**新**部署 → 换发 `syncToken`，回 `{ ok, teamId, teamName, syncToken }`。
+  ⚠️ `deploymentId` 是公开的（进 roster），所以**重复 deploymentId 不回吐已有 token、也不覆盖记录**，回 `409 deployment_already_joined`；重绑/轮转留待后续显式 reset（凭旧 syncToken）。
 - `POST /api/federation/sync` — `{ syncToken, bots[] }` → 刷新该部署 bot + `lastSeenAt`；回 `{ ok }`。
-- `GET /api/federation/roster?syncToken=…` → 聚合花名册（hub 本地 bot + 各 spoke 的 bot，按部署分组），供 spoke 在自己 dashboard 展示。
+- `GET /api/federation/roster` — **syncToken 走 `Authorization: Bearer <token>` 头**（不进 URL，避免落 access/proxy log）；Hub 短期兼容 `?syncToken=` 查询作 fallback。回聚合花名册（hub 本地 bot + 各 spoke 的 bot，按部署分组）。
+- `POST /api/federation/leave` — `{ syncToken }`（或 Bearer 头）→ 删除该部署（`removeDeploymentByToken`），spoke 主动退出/撤销时调用。幂等。
+
+所有出站调用（spoke→hub）统一 `fetchWithTimeout`（AbortController，8s），错误面稳定区分 `hub_timeout`(504) / `hub_unreachable`(502)。
 
 ### Spoke 侧（挂在 dashboard，**dashboard token 鉴权**，owner 操作）
 - `POST /api/team/join-remote` — `{ hubUrl, inviteCode }`
-  → 收集本机 bot（bots-info + 能力 + 尽力解析 botUnionId）→ 调 `hubUrl/api/federation/join` → 存 `RemoteMembership` → 回结果。
-- `GET /api/team/remote-roster` → 对每个已加入的 hub 拉 `/api/federation/roster`，汇总展示。
-- 周期同步：spoke 定时（dashboard 进程内 timer 或 daemon）向各 hub `POST /api/federation/sync` 推 bot + 心跳。
+  → 收集本机 bot（bots-info + 能力 + 尽力解析 botUnionId）→ 调 `hubUrl/api/federation/join` → 存 `RemoteMembership` → 回结果（hub 拒绝时透出 409 `deployment_already_joined` / 403 invite 错 / 504 `hub_timeout` / 502 `hub_unreachable`）。
+- `GET /api/team/remote-roster` → 对每个已加入的 hub 拉 `/api/federation/roster`（Bearer 头带 syncToken），汇总展示。
+- `POST /api/team/sync-remote` → 手动触发向各 hub 推 bot+心跳。
+- `POST /api/team/leave-remote` — `{ hubUrl, teamId }` → 先 best-effort 调 hub `/api/federation/leave` 撤销（回 `hubRevoked`），再忘掉本地 `RemoteMembership`。
+- 周期同步：dashboard 进程内 timer（2min）向各 hub `POST /api/federation/sync` 推 bot + 心跳。
 
 ## 聚合花名册
 
 Hub 的团队花名册 = 本地 bot（[[team-roster]]，按 bots.json 顺序）+ 各 spoke 的 `FederatedBot`，
-每条带 `deployment: { id, name } | 'local'`，按部署分组展示（本地置顶，远端按 name）。
+每条带 `deployment: { id, name, local, stale }`，按部署分组展示（本地置顶，远端按 name）。
+远端部署超过 `FEDERATION_STALE_MS`（5min）未同步即标 `stale`（疑似离线）——不硬隐藏，留 UI 降级展示。
+`AggregatedRosterBot` 保留 `botUnionId?`（P2 拉群按 union_id 加 bot 时免改接口）。
 
 ## 拉群（跨部署，P2）
 

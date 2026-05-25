@@ -9,10 +9,16 @@ import { join } from 'node:path';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 
 const state = vi.hoisted(() => ({ dataDir: '' }));
-vi.mock('../src/config.js', () => ({ config: { session: { get dataDir() { return state.dataDir; } } } }));
+vi.mock('../src/config.js', () => ({ config: {
+  session: { get dataDir() { return state.dataDir; } },
+  dashboard: { externalHost: 'localhost', port: 7891 },
+} }));
 
 import { handleFederationSpokeApi } from '../src/dashboard/federation-spoke-api.js';
 import { listMemberships } from '../src/services/federation-membership-store.js';
+import { getDeploymentIdentity } from '../src/services/deployment-identity.js';
+import { consumeInvite } from '../src/services/invite-store.js';
+import { DEFAULT_TEAM_ID } from '../src/services/team-store.js';
 
 let dataDir: string;
 beforeEach(() => { dataDir = mkdtempSync(join(tmpdir(), 'botmux-spoke-')); state.dataDir = dataDir; });
@@ -34,6 +40,39 @@ const json = (res: any) => JSON.parse(res._body);
 const jsonResp = (status: number, body: any) => ({ ok: status >= 200 && status < 300, status, json: async () => body } as any);
 
 describe('handleFederationSpokeApi', () => {
+  it('local: GET /api/team/local returns this deployment + own roster + suggested hub url', async () => {
+    writeBots([{ larkAppId: 'cli_me1', botOpenId: null, botName: '我的Bot', cliId: 'claude' }]);
+    const res = makeRes();
+    const handled = await handleFederationSpokeApi(makeReq('GET', '/api/team/local'), res, new URL('http://x/api/team/local'), { dataDir });
+    expect(handled).toBe(true);
+    expect(res.statusCode).toBe(200);
+    const b = json(res);
+    expect(b.deployment.deploymentId).toMatch(/^dep_/);
+    expect(b.suggestedHubUrl).toBe('http://localhost:7891');
+    expect(b.bots.map((x: any) => x.larkAppId)).toEqual(['cli_me1']);
+    expect(b.bots[0].deployment.local).toBe(true);
+  });
+
+  it('local: POST /api/team/local-invite mints a usable invite for my default team', async () => {
+    writeBots([]);
+    const res = makeRes();
+    await handleFederationSpokeApi(makeReq('POST', '/api/team/local-invite'), res, new URL('http://x/api/team/local-invite'), { dataDir });
+    expect(res.statusCode).toBe(200);
+    const code = json(res).code;
+    expect(code).toBeTruthy();
+    // the minted code admits to the default team
+    expect(consumeInvite(dataDir, code)).toEqual({ ok: true, teamId: DEFAULT_TEAM_ID });
+  });
+
+  it('local: POST /api/team/rename-deployment changes the name (id stable)', async () => {
+    writeBots([]);
+    const before = getDeploymentIdentity(dataDir);
+    const res = makeRes();
+    await handleFederationSpokeApi(makeReq('POST', '/api/team/rename-deployment', { name: '申晗的部署' }), res, new URL('http://x/api/team/rename-deployment'), { dataDir });
+    expect(res.statusCode).toBe(200);
+    expect(json(res).deployment).toMatchObject({ deploymentId: before.deploymentId, name: '申晗的部署' });
+  });
+
   it('join-remote: posts local bots to the hub and stores the membership', async () => {
     writeBots([{ larkAppId: 'cli_me1', botOpenId: null, botName: '我的Bot', cliId: 'claude' }]);
     let captured: any = null;
