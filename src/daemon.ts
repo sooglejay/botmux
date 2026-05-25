@@ -2028,12 +2028,17 @@ async function handleThreadReply(data: any, ctx: RoutingContext): Promise<void> 
       });
       enriched += `\n\n${tr('daemon.enriched_mentions_label', undefined, localeForBot(larkAppId))}\n${mentionLines.join('\n')}`;
     }
-    // Stamp each buffered follow-up with its own <sender> tag — pendingFollowUps
-    // can contain messages from multiple users while a single ds.pendingSender
-    // is fixed at the first message, so without per-message attribution the
-    // CLI can't tell which user said what after repo selection unlocks the spawn.
-    const followUpSenderTag = renderSenderTag(await getThreadSender());
-    if (followUpSenderTag) enriched = `${followUpSenderTag}\n${enriched}`;
+    // Stamp a buffered follow-up with its own <sender> tag ONLY when it comes
+    // from a different user than the first message (ds.pendingSender) — the
+    // deferred spawn already carries that sender's <sender> block, and the
+    // follow-ups now fold into the same <user_message>, so a same-user tag is
+    // pure duplication. A differing sender still gets attributed so the CLI can
+    // tell multi-user buffered messages apart after repo selection unlocks.
+    const followUpSender = await getThreadSender();
+    if (followUpSender?.openId && followUpSender.openId !== ds.pendingSender?.openId) {
+      const followUpSenderTag = renderSenderTag(followUpSender);
+      if (followUpSenderTag) enriched = `${followUpSenderTag}\n${enriched}`;
+    }
     if (!ds.pendingFollowUps) ds.pendingFollowUps = [];
     ds.pendingFollowUps.push(enriched);
     await sessionReply(anchor, tr('daemon.choose_repo_first', undefined, localeForBot(larkAppId)), 'text', larkAppId);
