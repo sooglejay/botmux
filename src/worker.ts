@@ -302,6 +302,11 @@ function formatHeadlessLocalTurnContent(assistantText: string): string | null {
 // needed. Append-only over a shared file (instead of a per-turn marker) is
 // type-ahead safe: type-ahead'd turns each have their own [markTimeMs,
 // nextTurn.markTimeMs) window, and a stray send only fills its own bucket.
+// This relies on each turn's markTimeMs reflecting when it ACTUALLY started
+// processing, not when the worker marked it — the structured queue overrides
+// markTimeMs to the dequeue-time transcript event (CodexBridgeQueue.ingest)
+// and emitReadyCodexTurns only treats a STARTED next turn as a boundary, so
+// the early back-to-back marks type-ahead produces don't collapse the windows.
 function bridgeMarkerPath(): string | undefined {
   if (!process.env.SESSION_DATA_DIR || !sessionId) return undefined;
   return join(process.env.SESSION_DATA_DIR, 'turn-sends', `${sessionId}.jsonl`);
@@ -1503,7 +1508,17 @@ function emitReadyCodexTurns(): void {
   // should reach the thread. Skip marker IO entirely.
   const markers = adoptMode ? [] : readSendMarkers();
   const remaining = codexBridgeQueue.peek();
-  const nextPendingMarkTimeMs = remaining.length > 0 ? remaining[0].markTimeMs : undefined;
+  // Only a STARTED pending turn can bound the last ready turn's send window.
+  // An unstarted turn hasn't been dequeued yet (its user event hasn't landed),
+  // so it has produced no sends to leak backwards — and under type-ahead its
+  // markTimeMs is still the early flush-time mark, which would prematurely
+  // (often invalidly, lower>upper) close the ready turn's window and let its
+  // own send escape suppression → duplicate. A started-but-not-final turn
+  // (model mid-tool-use for N+1) keeps its real overridden markTimeMs as the
+  // boundary, preserving the original leak guard.
+  const nextPendingMarkTimeMs = remaining.length > 0 && remaining[0].started
+    ? remaining[0].markTimeMs
+    : undefined;
   for (let i = 0; i < ready.length; i++) {
     const turn = ready[i];
     if (!turn.finalText) continue;
