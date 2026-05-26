@@ -92,6 +92,19 @@ export function getActiveSessionsRegistry(): Map<string, DaemonSession> | undefi
   return activeSessionsRegistry;
 }
 
+// ─── Terminal URL helpers ──────────────────────────────────────────────────
+// config.web.externalHost is a live getter (re-resolves the LAN IP each read
+// when WEB_EXTERNAL_HOST is unset), so building the URL fresh at every card
+// render/patch is enough to keep links pointing at the current network.
+
+function terminalReadUrl(port: number): string {
+  return `http://${config.web.externalHost}:${port}`;
+}
+
+function terminalWriteUrl(port: number, token: string): string {
+  return `${terminalReadUrl(port)}?token=${encodeURIComponent(token)}`;
+}
+
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 function tag(ds: DaemonSession): string {
@@ -153,7 +166,7 @@ function scheduleUsageLimitCardPatch(ds: DaemonSession): void {
 
   const bot = getBot(ds.larkAppId);
   const effectiveCliId = sessionCliId(ds, bot.config);
-  const readUrl = `http://${config.web.externalHost}:${port}`;
+  const readUrl = terminalReadUrl(port);
   const turnTitle = ds.currentTurnTitle || ds.session.title || getCliDisplayName(effectiveCliId);
   const cardJson = buildStreamingCard(
     ds.session.sessionId,
@@ -770,8 +783,8 @@ function setupWorkerHandlers(ds: DaemonSession, worker: ChildProcess): void {
         // Persist port so it can be reused after daemon restart
         ds.session.webPort = msg.port;
         sessionStore.updateSession(ds.session);
-        const readOnlyUrl = `http://${config.web.externalHost}:${msg.port}`;
-        const writeUrl = `${readOnlyUrl}?token=${msg.token}`;
+        const readOnlyUrl = terminalReadUrl(msg.port);
+        const writeUrl = terminalWriteUrl(msg.port, msg.token);
         logger.info(`[${t}] Worker ready, terminal at ${readOnlyUrl}`);
         if (ds.usageLimit) {
           ds.lastScreenStatus = 'limited';
