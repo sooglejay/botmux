@@ -340,7 +340,9 @@ async function ensureThread(): Promise<string> {
         config: { shell_environment_policy: { inherit: 'all' } },
         developerInstructions: appDeveloperInstructions(args),
         excludeTurns: true,
-        persistExtendedHistory: false,
+        // Keep Codex App's rich history in sync with turns created by this
+        // external runner so the desktop UI can render follow-up messages.
+        persistExtendedHistory: true,
       });
       const resumedThreadId = String(resumed.thread.id);
       threadId = resumedThreadId;
@@ -363,7 +365,9 @@ async function ensureThread(): Promise<string> {
     developerInstructions: appDeveloperInstructions(args),
     ephemeral: false,
     experimentalRawEvents: false,
-    persistExtendedHistory: false,
+    // Keep Codex App's rich history in sync with turns created by this
+    // external runner so the desktop UI can render follow-up messages.
+    persistExtendedHistory: true,
   });
   const startedThreadId = String(started.thread.id);
   threadId = startedThreadId;
