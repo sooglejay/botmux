@@ -232,8 +232,16 @@ export async function handleFederationApi(
     if (!deps.createTeamGroup) { jsonRes(res, 501, { ok: false, error: 'group_create_unavailable' }); return true; }
     let body: any;
     try { body = await readBody(req); } catch { jsonRes(res, 400, { ok: false, error: 'bad_json' }); return true; }
-    const token = federationToken(req, url) || String(body?.delegationToken ?? '').trim();
+    const token = bearerOnly(req); // header-only: same pre-auth write semantics as /group (never URL/body)
     if (!findMembershipByDelegationToken(dataDir, token)) { jsonRes(res, 403, { ok: false, error: 'unknown_token' }); return true; }
+    const requestId = String(body?.requestId ?? '').trim();
+    if (!requestId) { jsonRes(res, 400, { ok: false, error: 'request_id_required' }); return true; }
+    // Idempotency: replay of {token, requestId} returns the FIRST terminal result
+    // verbatim — including failures (createTeamGroup may have side-effected). A
+    // genuine retry must use a fresh requestId; replaying never re-creates.
+    const idemKey = `delegate:${token}:${requestId}`;
+    const cached = idemGet(idemKey) as { status: number; body: any } | undefined;
+    if (cached) { jsonRes(res, cached.status, cached.body); return true; }
     // Dedup + cap inputs (pre-auth command endpoint — keep blast radius small).
     const larkAppIds: string[] = Array.from(new Set((Array.isArray(body?.larkAppIds) ? body.larkAppIds : []).filter((x: any) => typeof x === 'string')));
     const ownerUnionIds: string[] = Array.from(new Set((Array.isArray(body?.ownerUnionIds) ? body.ownerUnionIds : []).filter((x: any) => typeof x === 'string')));
@@ -244,13 +252,10 @@ export async function handleFederationApi(
     // (otherwise it's unrelated to this deployment — refuse to act as creator).
     const localIds = new Set(buildTeamRoster(dataDir, undefined, undefined, deps.liveBots?.()).bots.map(b => b.larkAppId));
     if (!larkAppIds.some(id => localIds.has(id))) { jsonRes(res, 400, { ok: false, error: 'no_local_bot' }); return true; }
-    // Idempotency: replays of the same {token, requestId} return the first result.
-    const requestId = String(body?.requestId ?? '').trim();
-    const idemKey = requestId ? `${token}:${requestId}` : '';
-    if (idemKey) { const cached = idemGet(idemKey); if (cached) { jsonRes(res, 200, cached); return true; } }
     const r = await deps.createTeamGroup({ name, larkAppIds, ownerUnionIds });
-    if (idemKey && r.ok) idemSet(idemKey, r);
-    jsonRes(res, r.ok ? 200 : 502, r);
+    const result = { status: r.ok ? 200 : 502, body: r };
+    idemSet(idemKey, result); // cache terminal result (success AND failure)
+    jsonRes(res, result.status, result.body);
     return true;
   }
 
