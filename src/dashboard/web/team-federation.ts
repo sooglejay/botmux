@@ -157,10 +157,11 @@ function renderTeams(): void {
   const el = $('tf-teams');
   const teams = allTeams();
   if (!teams.length) { el.innerHTML = '<p class="muted">还没有团队。生成邀请码让别人加入你，或用上方「加入别人的团队」。</p>'; $('tf-count').textContent = ''; return; }
-  let html = ''; let shown = 0, total = 0;
+  let html = '';
+  const shownIds = new Set<string>(), totalIds = new Set<string>(); // dedupe bots shared across teams
   for (const t of teams) {
     const filtered = t.bots.filter(botMatch);
-    shown += filtered.length; total += t.bots.length;
+    filtered.forEach(b => shownIds.add(b.larkAppId)); t.bots.forEach(b => totalIds.add(b.larkAppId));
     const visible = new Set(filtered.map(b => b.larkAppId)); // prune picks now hidden by filter
     [...pickedSet(t.key)].forEach(a => { if (!visible.has(a)) pickedSet(t.key).delete(a); });
     const col = collapsedTeams.has(t.key);
@@ -184,7 +185,8 @@ function renderTeams(): void {
     html += '</div>';
   }
   el.innerHTML = html;
-  $('tf-count').textContent = `· 共 ${shown} / ${total} 个机器人`;
+  const acrossTeams = teams.length > 1 ? `（跨 ${teams.length} 个团队，去重）` : '';
+  $('tf-count').textContent = `· ${shownIds.size === totalIds.size ? `${totalIds.size}` : `${shownIds.size} / ${totalIds.size}`} 个机器人${acrossTeams}`;
   wireTeams();
 }
 
@@ -278,11 +280,18 @@ async function loadLocal(): Promise<void> {
 async function loadRemote(): Promise<void> {
   const r = await jget('/api/team/remote-roster');
   const list = (r.body as any)?.memberships || [];
-  remoteTeams = list.map((m: any) => ({
-    kind: 'remote' as const, key: `${m.hubUrl}::${m.teamId}`, label: m.teamName || m.teamId, sub: m.hubUrl,
-    ok: !!m.ok, error: m.error, hubUrl: m.hubUrl, teamId: m.teamId,
-    deployments: m.roster?.deployments || [], bots: m.roster?.bots || [],
-  }));
+  remoteTeams = list.map((m: any) => {
+    const deployments: RosterDeployment[] = m.roster?.deployments || [];
+    // The hub's own deployment is local=true in its roster; its name is the hub
+    // owner's Feishu name (binding adopts it) — clearer than the generic team name.
+    const hub = deployments.find(d => d.local);
+    const label = hub?.name ? `${hub.name} 的团队` : (m.teamName || m.teamId);
+    return {
+      kind: 'remote' as const, key: `${m.hubUrl}::${m.teamId}`, label, sub: m.hubUrl,
+      ok: !!m.ok, error: m.error, hubUrl: m.hubUrl, teamId: m.teamId,
+      deployments, bots: m.roster?.bots || [],
+    };
+  });
   refreshCliOptions();
   renderTeams();
 }
