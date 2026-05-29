@@ -26,6 +26,8 @@
     .search-btn kbd { margin-left:auto; font-size:11px; background:var(--code-bg); border:1px solid var(--line); border-radius:5px; padding:1px 6px; }
     .gh { color:var(--ink); opacity:.75; text-decoration:none; display:flex; align-items:center; }
     .gh:hover { opacity:1; }
+    .iconbtn { border:none; background:none; cursor:pointer; color:var(--ink); opacity:.7; display:flex; align-items:center; padding:6px; border-radius:7px; }
+    .iconbtn:hover { opacity:1; background:#f0eefb; color:var(--brand); }
     .hamb { display:none; border:none; background:none; cursor:pointer; padding:6px; }
     /* layout */
     .body { flex:1; display:flex; min-height:0; }
@@ -112,6 +114,9 @@
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
         <span class="stxt">搜索文档…</span>
         <kbd>/</kbd>
+      </button>
+      <button class="iconbtn" id="copyLink" title="复制本页链接（可分享到具体文档）">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 0 0 7.07 0l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.07 0l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
       </button>
       <a class="gh" href="https://github.com/deepcoldy/botmux" target="_blank" rel="noopener" title="GitHub">
         <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M12 .5C5.7.5.5 5.7.5 12c0 5.1 3.3 9.4 7.9 10.9.6.1.8-.2.8-.5v-2c-3.2.7-3.9-1.4-3.9-1.4-.5-1.3-1.3-1.7-1.3-1.7-1.1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1 1.8 2.7 1.3 3.4 1 .1-.7.4-1.3.7-1.6-2.6-.3-5.3-1.3-5.3-5.7 0-1.3.5-2.3 1.2-3.1-.1-.3-.5-1.5.1-3.1 0 0 1-.3 3.3 1.2a11.5 11.5 0 0 1 6 0C17.3 4.7 18.3 5 18.3 5c.6 1.6.2 2.8.1 3.1.8.8 1.2 1.8 1.2 3.1 0 4.4-2.7 5.4-5.3 5.7.4.4.8 1.1.8 2.2v3.3c0 .3.2.6.8.5 4.6-1.5 7.9-5.8 7.9-10.9C23.5 5.7 18.3.5 12 .5z"/></svg>
@@ -1358,6 +1363,7 @@ Claude Code · Codex · Cursor · Gemini · OpenCode · CoCo(Trae) · Aiden · A
     const contentEl = document.getElementById('content');
     function render(id){
       if(!DOCS[id]) id='intro';
+      CUR = id;
       mdEl.innerHTML = marked.parse(DOCS[id]);
       // 给 h2/h3 加锚点 id
       mdEl.querySelectorAll('h2,h3').forEach(h=>{ if(!h.id) h.id=slug(h.textContent); });
@@ -1379,19 +1385,31 @@ Claude Code · Codex · Cursor · Gemini · OpenCode · CoCo(Trae) · Aiden · A
       window.magic.updateHeight && window.magic.updateHeight();
     }
 
-    // 是否在 iframe 内（妙笔 HTML Box 把页面跑在 sandbox iframe 里，
-    // 此时写 location.hash 会触发 iframe 重新加载、把视图打回首页，所以禁用 hash）
-    const IN_IFRAME = (()=>{ try{ return window.self!==window.top; }catch(e){ return true; } })();
-    function go(id){
-      if(!IN_IFRAME){ try{ if(location.hash.slice(2)!==id) location.hash = '#/'+id; }catch(e){} }
-      render(id);
-      closeSidebar();
-    }
+    // 妙笔 HTML Box 跑在 sandbox iframe 里，iframe 读不到母页 URL 的 hash，
+    // 但 runtime 注入了 window.magic.parentHref（外层页面 URL，含分享用的 #/<页面>）。
+    // 深链直达靠读 parentHref；分享链接也基于它拼。点击导航不改地址栏（navigate 会重载），
+    // 要分享当前页用右上角「🔗 复制链接」按钮。
+    let CUR = 'intro';
+    function parentUrl(){ try{ return (window.magic && window.magic.parentHref) ? window.magic.parentHref : location.href; }catch(e){ return location.href; } }
+    function deepLinkId(){ const h = (parentUrl().split('#')[1] || '').replace(/^\//,''); return h; }
+    function shareUrl(){ return parentUrl().split('#')[0] + '#/' + CUR; }
+    function go(id){ render(id); closeSidebar(); }
     window.go = go;
 
     document.getElementById('brandHome').addEventListener('click',()=>go('intro'));
 
-    window.addEventListener('hashchange',()=>{ const id=location.hash.replace(/^#\//,'')||'intro'; if(DOCS[id]) render(id); });
+    function toast(msg){
+      let el=document.getElementById('__toast');
+      if(!el){ el=document.createElement('div'); el.id='__toast'; el.style.cssText='position:fixed;left:50%;bottom:32px;transform:translateX(-50%);background:#1f2330;color:#fff;padding:9px 18px;border-radius:9px;font-size:13px;z-index:60;opacity:0;transition:opacity .2s;box-shadow:0 6px 20px rgba(0,0,0,.25);max-width:90vw;text-align:center;'; document.body.appendChild(el); }
+      el.textContent=msg; el.style.opacity='1'; clearTimeout(el.__t); el.__t=setTimeout(()=>el.style.opacity='0',2000);
+    }
+    document.getElementById('copyLink').addEventListener('click', async ()=>{
+      const url = shareUrl();
+      try{ await navigator.clipboard.writeText(url); }
+      catch(e){ const t=document.createElement('textarea'); t.value=url; t.style.position='fixed'; t.style.left='-9999px'; document.body.appendChild(t); t.select(); try{document.execCommand('copy');}catch(_){} t.remove(); }
+      toast('🔗 本页链接已复制');
+    });
+
 
     // 移动端侧边栏
     const hamb=document.getElementById('hamb'), backdrop=document.getElementById('backdrop');
@@ -1448,8 +1466,11 @@ Claude Code · Codex · Cursor · Gemini · OpenCode · CoCo(Trae) · Aiden · A
       }
     });
 
-    // 初始渲染
-    render(location.hash.replace(/^#\//,'')||'intro');
+    // 初始渲染 + 深链直达：window.magic.parentHref 可能在 init 后才注入，故重试几次读取
+    function routeIn(){ const id=deepLinkId(); if(id && DOCS[id] && id!==CUR) render(id); }
+    const _id0 = deepLinkId();
+    render(_id0 && DOCS[_id0] ? _id0 : 'intro');
+    [150,400,900,1800,3000].forEach(ms=> setTimeout(routeIn, ms));
   </script>
 </body>
 </html>
