@@ -76,15 +76,15 @@ ${subNav('home')}
     <input id="tf-search" placeholder="搜索 名称/能力/CLI…" style="padding:5px 9px;min-width:180px">
     <select id="tf-cli" style="padding:5px"><option value="">全部 CLI</option></select>
     <label><input type="checkbox" id="tf-fcap"> 有能力标签</label>
-    <label><input type="checkbox" id="tf-frole"> 有团队角色</label>
+    <label><input type="checkbox" id="tf-frole"> 有默认角色</label>
   </div>
   <p class="muted" style="font-size:13px;margin:0 0 4px">每个团队里勾选机器人即可单独拉群（自动带上各自负责人）。要新建团队 / 生成邀请码 / 加入别人的团队，去「团队管理」。</p>
   <div id="tf-teams">加载中…</div>
 </div>
 <div id="tf-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);align-items:center;justify-content:center;z-index:50">
   <div style="background:var(--card,#fff);color:var(--text,#1f2329);border-radius:10px;padding:18px 20px;width:min(560px,92vw)">
-    <h2 id="tf-modal-title" style="margin-top:0">团队角色</h2>
-    <p class="muted" style="font-size:13px">团队级角色（该机器人跨群的默认人设），此处只读。如需修改，请到「Bot 配置」页。</p>
+    <h2 id="tf-modal-title" style="margin-top:0">默认角色</h2>
+    <p class="muted" style="font-size:13px">该机器人的默认人设（跨群生效），此处只读。如需修改，请到「Bot 配置」页。</p>
     <textarea id="tf-modal-text" readonly style="width:100%;min-height:200px;font:13px/1.5 ui-monospace,Menlo,monospace;padding:10px;box-sizing:border-box"></textarea>
     <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:12px">
       <button id="tf-modal-cancel">关闭</button>
@@ -256,7 +256,7 @@ function renderGroupResult(out: HTMLElement, b: any, status: number): void {
 
 async function openRoleModal(app: string, name: string): Promise<void> {
   const r = await jget('/api/team/local-bots/' + encodeURIComponent(app) + '/role');
-  $('tf-modal-title').textContent = '团队角色 · ' + name;
+  $('tf-modal-title').textContent = '默认角色 · ' + name;
   ($('tf-modal-text') as HTMLTextAreaElement).value = (r.body as any)?.role || '';
   $('tf-modal').dataset.app = app;
   $('tf-modal').style.display = 'flex';
