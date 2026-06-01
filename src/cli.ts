@@ -2885,6 +2885,12 @@ async function cmdSend(rest: string[]): Promise<void> {
         }
       }
       for (const m of mentions) {
+        // Clear boundary for the false-positive: the bot I'm replying to in THIS
+        // conversation (its message set quoteTargetSenderOpenId) is reachable
+        // right here — @-ing it back doesn't spawn a new session — so don't block
+        // it, even if it's ALSO a dispatched sub-bot in some other topic. The
+        // guard still fires for @-ing OTHER dispatched sub-bots not conversing here.
+        if (m.open_id === s.quoteTargetSenderOpenId) continue;
         const seed = findSubBotTopic({ mentionOpenId: m.open_id, chatId: targetChatId, registry: reg, activeSeeds });
         if (seed) {
           console.error(
