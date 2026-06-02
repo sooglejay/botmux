@@ -190,6 +190,38 @@ export function renderSenderTag(sender?: ResolvedSender): string {
   return `<sender ${attrs.join(' ')} />`;
 }
 
+/**
+ * cursor-agent's model tends to copy the inlined `<sender open_id="ou_xxx"
+ * name="高鹏" />` verbatim into its reply — it reads `open_id:name` as the
+ * `--mention <open_id:name>` form and leaks `ou_xxx:高鹏` into the `botmux
+ * send` body / opening line. Other CLIs haven't shown this, so the guard is
+ * scoped to cursor only (claude-code et al. that set injectsSessionContext
+ * never see this inline tag anyway). Returns '' for every other CLI and when
+ * there is no sender tag to misread.
+ */
+export function renderCursorSenderNote(cliId: CliId | undefined, hasSender: boolean, locale?: Locale): string {
+  if (cliId !== 'cursor' || !hasSender) return '';
+  return `<sender_note>${t('ai.cursor.sender_note', undefined, locale)}</sender_note>`;
+}
+
+/**
+ * Render a buffered follow-up's sender attribution for daemon's pending-repo
+ * branch (handleThreadReply), where a cross-user follow-up's `<sender>` tag is
+ * prepended OUTSIDE the builder and later folds into the opening
+ * `<user_message>`. Pair the tag with the cursor anti-echo note so a folded-in
+ * foreign sender gets the same protection the builder gives its own top-level
+ * `<sender>`; otherwise an inline `ou_xxx:name` reaches cursor with no adjacent
+ * note (the builder's note only covers `ds.pendingSender`'s top-level tag, and
+ * may be absent entirely when pendingSender is undefined). Returns '' when
+ * there is no sender to attribute.
+ */
+export function renderBufferedSenderBlock(sender: ResolvedSender | undefined, cliId: CliId | undefined, locale?: Locale): string {
+  const tag = renderSenderTag(sender);
+  if (!tag) return '';
+  const note = renderCursorSenderNote(cliId, true, locale);
+  return note ? `${tag}\n${note}` : tag;
+}
+
 export function formatAttachmentsHint(attachments?: LarkAttachment[], locale?: Locale): string {
   if (!attachments || attachments.length === 0) return '';
   let imgN = 0, fileN = 0;
@@ -283,6 +315,9 @@ export function buildNewTopicPrompt(
   const senderBlock = renderSenderTag(sender);
   if (senderBlock) parts.push(senderBlock);
 
+  const senderNote = renderCursorSenderNote(cliId, !!senderBlock, locale);
+  if (senderNote) parts.push(senderNote);
+
   const attachHint = formatAttachmentsHint(attachments, locale);
   if (attachHint) parts.push(attachHint);
 
@@ -314,6 +349,9 @@ export function buildFollowUpContent(
 
   const senderBlock = renderSenderTag(opts?.sender);
   if (senderBlock) parts.push(senderBlock);
+
+  const senderNote = renderCursorSenderNote(opts?.cliId, !!senderBlock, opts?.locale);
+  if (senderNote) parts.push(senderNote);
 
   const attachHint = opts?.attachments && opts.attachments.length > 0
     ? formatAttachmentsHint(opts.attachments, opts.locale)

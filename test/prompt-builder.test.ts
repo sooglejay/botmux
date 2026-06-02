@@ -56,7 +56,7 @@ vi.mock('../src/core/worker-pool.js', () => ({
 
 // ─── Imports ──────────────────────────────────────────────────────────────
 
-import { buildNewTopicPrompt, buildFollowUpContent, buildReforkPrompt, renderSenderTag } from '../src/core/session-manager.js';
+import { buildNewTopicPrompt, buildFollowUpContent, buildReforkPrompt, renderSenderTag, renderCursorSenderNote, renderBufferedSenderBlock } from '../src/core/session-manager.js';
 import type { DaemonSession } from '../src/core/types.js';
 
 // ─── Tests ────────────────────────────────────────────────────────────────
@@ -199,6 +199,32 @@ describe('buildFollowUpContent', () => {
     expect(content).not.toContain('<botmux_reminder>');
     expect(content).not.toContain('botmux send');
   });
+
+  it('injects <sender_note> for cursor follow-ups carrying a sender', () => {
+    const content = buildFollowUpContent('hi', SESSION_ID, {
+      cliId: 'cursor',
+      sender: { openId: 'ou_gp', type: 'user', name: '高鹏' },
+    });
+    // The note must sit right after the <sender> tag so the model reads them together.
+    expect(content).toContain('<sender type="user" open_id="ou_gp" name="高鹏" />');
+    expect(content).toContain('<sender_note>');
+    expect(content).toContain('--mention-back');
+    expect(content.indexOf('<sender_note>')).toBeGreaterThan(content.indexOf('<sender '));
+  });
+
+  it('does NOT inject <sender_note> for non-cursor CLIs even with a sender', () => {
+    const content = buildFollowUpContent('hi', SESSION_ID, {
+      cliId: 'codex',
+      sender: { openId: 'ou_gp', type: 'user', name: '高鹏' },
+    });
+    expect(content).toContain('<sender '); // sender tag still present
+    expect(content).not.toContain('<sender_note>');
+  });
+
+  it('does NOT inject <sender_note> for cursor when there is no sender', () => {
+    const content = buildFollowUpContent('hi', SESSION_ID, { cliId: 'cursor' });
+    expect(content).not.toContain('<sender_note>');
+  });
 });
 
 // ─── buildReforkPrompt — wraps re-fork branch (resume / daemon-restart) ─────
@@ -330,6 +356,131 @@ describe('renderSenderTag', () => {
     // And the tag's outer quotes are not eaten by inner ones.
     expect(out.startsWith('<sender ')).toBe(true);
     expect(out.endsWith(' />')).toBe(true);
+  });
+});
+
+// ─── renderCursorSenderNote — cursor-only anti-echo guard ──────────────────
+
+describe('renderCursorSenderNote', () => {
+  it('returns the note only for cursor with a sender present', () => {
+    const out = renderCursorSenderNote('cursor', true);
+    expect(out).toContain('<sender_note>');
+    expect(out).toContain('--mention-back');
+  });
+
+  it('returns empty for cursor when no sender tag is present', () => {
+    expect(renderCursorSenderNote('cursor', false)).toBe('');
+  });
+
+  it('returns empty for every non-cursor CLI', () => {
+    for (const cli of ['claude-code', 'codex', 'gemini', 'opencode', 'coco', 'aiden'] as const) {
+      expect(renderCursorSenderNote(cli, true)).toBe('');
+    }
+  });
+
+  it('returns empty when cliId is undefined', () => {
+    expect(renderCursorSenderNote(undefined, true)).toBe('');
+  });
+});
+
+// ─── renderBufferedSenderBlock — daemon pending-repo cross-user buffer ──────
+//
+// daemon.ts (handleThreadReply) prepends a foreign sender's <sender> tag to a
+// buffered follow-up OUTSIDE the builder; it later folds into the opening
+// <user_message>. For cursor the tag MUST carry an adjacent anti-echo note,
+// else a folded-in ou_xxx:name reaches cursor unguarded.
+
+describe('renderBufferedSenderBlock', () => {
+  const SENDER = { openId: 'ou_bob', type: 'user', name: 'Bob' } as const;
+
+  it('pairs the <sender> tag with an adjacent <sender_note> for cursor', () => {
+    const out = renderBufferedSenderBlock(SENDER, 'cursor');
+    expect(out).toContain('<sender type="user" open_id="ou_bob" name="Bob" />');
+    expect(out).toContain('<sender_note>');
+    // Note sits right after the tag so cursor reads them together.
+    expect(out.indexOf('<sender_note>')).toBeGreaterThan(out.indexOf('<sender '));
+  });
+
+  it('renders the bare <sender> tag (no note) for non-cursor CLIs', () => {
+    for (const cli of ['claude-code', 'codex', 'gemini', 'opencode', 'coco', 'aiden'] as const) {
+      const out = renderBufferedSenderBlock(SENDER, cli);
+      expect(out).toContain('open_id="ou_bob"');
+      expect(out).not.toContain('<sender_note>');
+    }
+  });
+
+  it('renders the bare <sender> tag when cliId is undefined', () => {
+    const out = renderBufferedSenderBlock(SENDER, undefined);
+    expect(out).toContain('open_id="ou_bob"');
+    expect(out).not.toContain('<sender_note>');
+  });
+
+  it('returns empty when there is no resolvable sender', () => {
+    expect(renderBufferedSenderBlock(undefined, 'cursor')).toBe('');
+    expect(renderBufferedSenderBlock({ openId: '', type: 'user' }, 'cursor')).toBe('');
+  });
+});
+
+// ─── buildNewTopicPrompt: buffered cursor follow-up keeps note inside body ──
+//
+// End-to-end shape: daemon hands buildNewTopicPrompt the buffered string
+// produced by renderBufferedSenderBlock; folding into <user_message> must
+// preserve the foreign sender's adjacent note (so ou_bob:Bob is guarded even
+// though it lives inside the body, not at the top level).
+
+describe('buildNewTopicPrompt cursor buffered multi-user follow-up', () => {
+  it('keeps the foreign sender note adjacent inside the folded <user_message>', () => {
+    const buffered = `${renderBufferedSenderBlock({ openId: 'ou_bob', type: 'user', name: 'Bob' }, 'cursor')}\nBob 的补充`;
+    const prompt = buildNewTopicPrompt(
+      '主消息（Alice）', 'sid', 'cursor',
+      undefined, undefined, undefined, undefined,
+      [buffered],
+      undefined, undefined,
+      { openId: 'ou_alice', type: 'user', name: 'Alice' },
+    );
+    const body = prompt.match(/<user_message>\n([\s\S]*?)\n<\/user_message>/)![1];
+    expect(body).toContain('open_id="ou_bob"');
+    expect(body).toContain('<sender_note>');
+    // Bob's inline tag is immediately followed by the note inside the body.
+    expect(body.indexOf('<sender_note>')).toBeGreaterThan(body.indexOf('open_id="ou_bob"'));
+  });
+
+  it('omits the buffered note for a codex session (bare foreign tag only)', () => {
+    const buffered = `${renderBufferedSenderBlock({ openId: 'ou_bob', type: 'user', name: 'Bob' }, 'codex')}\nBob 的补充`;
+    const prompt = buildNewTopicPrompt(
+      '主消息（Alice）', 'sid', 'codex',
+      undefined, undefined, undefined, undefined,
+      [buffered],
+      undefined, undefined,
+      { openId: 'ou_alice', type: 'user', name: 'Alice' },
+    );
+    const body = prompt.match(/<user_message>\n([\s\S]*?)\n<\/user_message>/)![1];
+    expect(body).toContain('open_id="ou_bob"');
+    expect(body).not.toContain('<sender_note>');
+  });
+});
+
+// ─── buildNewTopicPrompt cursor sender-note injection ───────────────────────
+
+describe('buildNewTopicPrompt cursor <sender_note>', () => {
+  it('adds <sender_note> for cursor new topics with a sender', () => {
+    const prompt = buildNewTopicPrompt(
+      'hello', 'sid', 'cursor',
+      undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+      { openId: 'ou_gp', type: 'user', name: '高鹏' },
+    );
+    expect(prompt).toContain('<sender_note>');
+    expect(prompt.indexOf('<sender_note>')).toBeGreaterThan(prompt.indexOf('<sender '));
+  });
+
+  it('omits <sender_note> for codex new topics with the same sender', () => {
+    const prompt = buildNewTopicPrompt(
+      'hello', 'sid', 'codex',
+      undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+      { openId: 'ou_gp', type: 'user', name: '高鹏' },
+    );
+    expect(prompt).toContain('<sender ');
+    expect(prompt).not.toContain('<sender_note>');
   });
 });
 
