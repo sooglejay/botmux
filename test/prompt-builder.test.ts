@@ -56,7 +56,7 @@ vi.mock('../src/core/worker-pool.js', () => ({
 
 // ─── Imports ──────────────────────────────────────────────────────────────
 
-import { buildNewTopicPrompt, buildFollowUpContent, buildReforkPrompt, renderSenderTag, renderCursorSenderNote } from '../src/core/session-manager.js';
+import { buildNewTopicPrompt, buildFollowUpContent, buildReforkPrompt, renderSenderTag, renderCursorSenderNote, renderBufferedSenderBlock } from '../src/core/session-manager.js';
 import type { DaemonSession } from '../src/core/types.js';
 
 // ─── Tests ────────────────────────────────────────────────────────────────
@@ -380,6 +380,83 @@ describe('renderCursorSenderNote', () => {
 
   it('returns empty when cliId is undefined', () => {
     expect(renderCursorSenderNote(undefined, true)).toBe('');
+  });
+});
+
+// ─── renderBufferedSenderBlock — daemon pending-repo cross-user buffer ──────
+//
+// daemon.ts (handleThreadReply) prepends a foreign sender's <sender> tag to a
+// buffered follow-up OUTSIDE the builder; it later folds into the opening
+// <user_message>. For cursor the tag MUST carry an adjacent anti-echo note,
+// else a folded-in ou_xxx:name reaches cursor unguarded.
+
+describe('renderBufferedSenderBlock', () => {
+  const SENDER = { openId: 'ou_bob', type: 'user', name: 'Bob' } as const;
+
+  it('pairs the <sender> tag with an adjacent <sender_note> for cursor', () => {
+    const out = renderBufferedSenderBlock(SENDER, 'cursor');
+    expect(out).toContain('<sender type="user" open_id="ou_bob" name="Bob" />');
+    expect(out).toContain('<sender_note>');
+    // Note sits right after the tag so cursor reads them together.
+    expect(out.indexOf('<sender_note>')).toBeGreaterThan(out.indexOf('<sender '));
+  });
+
+  it('renders the bare <sender> tag (no note) for non-cursor CLIs', () => {
+    for (const cli of ['claude-code', 'codex', 'gemini', 'opencode', 'coco', 'aiden'] as const) {
+      const out = renderBufferedSenderBlock(SENDER, cli);
+      expect(out).toContain('open_id="ou_bob"');
+      expect(out).not.toContain('<sender_note>');
+    }
+  });
+
+  it('renders the bare <sender> tag when cliId is undefined', () => {
+    const out = renderBufferedSenderBlock(SENDER, undefined);
+    expect(out).toContain('open_id="ou_bob"');
+    expect(out).not.toContain('<sender_note>');
+  });
+
+  it('returns empty when there is no resolvable sender', () => {
+    expect(renderBufferedSenderBlock(undefined, 'cursor')).toBe('');
+    expect(renderBufferedSenderBlock({ openId: '', type: 'user' }, 'cursor')).toBe('');
+  });
+});
+
+// ─── buildNewTopicPrompt: buffered cursor follow-up keeps note inside body ──
+//
+// End-to-end shape: daemon hands buildNewTopicPrompt the buffered string
+// produced by renderBufferedSenderBlock; folding into <user_message> must
+// preserve the foreign sender's adjacent note (so ou_bob:Bob is guarded even
+// though it lives inside the body, not at the top level).
+
+describe('buildNewTopicPrompt cursor buffered multi-user follow-up', () => {
+  it('keeps the foreign sender note adjacent inside the folded <user_message>', () => {
+    const buffered = `${renderBufferedSenderBlock({ openId: 'ou_bob', type: 'user', name: 'Bob' }, 'cursor')}\nBob 的补充`;
+    const prompt = buildNewTopicPrompt(
+      '主消息（Alice）', 'sid', 'cursor',
+      undefined, undefined, undefined, undefined,
+      [buffered],
+      undefined, undefined,
+      { openId: 'ou_alice', type: 'user', name: 'Alice' },
+    );
+    const body = prompt.match(/<user_message>\n([\s\S]*?)\n<\/user_message>/)![1];
+    expect(body).toContain('open_id="ou_bob"');
+    expect(body).toContain('<sender_note>');
+    // Bob's inline tag is immediately followed by the note inside the body.
+    expect(body.indexOf('<sender_note>')).toBeGreaterThan(body.indexOf('open_id="ou_bob"'));
+  });
+
+  it('omits the buffered note for a codex session (bare foreign tag only)', () => {
+    const buffered = `${renderBufferedSenderBlock({ openId: 'ou_bob', type: 'user', name: 'Bob' }, 'codex')}\nBob 的补充`;
+    const prompt = buildNewTopicPrompt(
+      '主消息（Alice）', 'sid', 'codex',
+      undefined, undefined, undefined, undefined,
+      [buffered],
+      undefined, undefined,
+      { openId: 'ou_alice', type: 'user', name: 'Alice' },
+    );
+    const body = prompt.match(/<user_message>\n([\s\S]*?)\n<\/user_message>/)![1];
+    expect(body).toContain('open_id="ou_bob"');
+    expect(body).not.toContain('<sender_note>');
   });
 });
 

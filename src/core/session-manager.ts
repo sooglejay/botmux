@@ -202,6 +202,24 @@ export function renderCursorSenderNote(cliId: CliId | undefined, hasSender: bool
   return `<sender_note>${t('ai.cursor.sender_note', undefined, locale)}</sender_note>`;
 }
 
+/**
+ * Render a buffered follow-up's sender attribution for daemon's pending-repo
+ * branch (handleThreadReply), where a cross-user follow-up's `<sender>` tag is
+ * prepended OUTSIDE the builder and later folds into the opening
+ * `<user_message>`. Pair the tag with the cursor anti-echo note so a folded-in
+ * foreign sender gets the same protection the builder gives its own top-level
+ * `<sender>`; otherwise an inline `ou_xxx:name` reaches cursor with no adjacent
+ * note (the builder's note only covers `ds.pendingSender`'s top-level tag, and
+ * may be absent entirely when pendingSender is undefined). Returns '' when
+ * there is no sender to attribute.
+ */
+export function renderBufferedSenderBlock(sender: ResolvedSender | undefined, cliId: CliId | undefined, locale?: Locale): string {
+  const tag = renderSenderTag(sender);
+  if (!tag) return '';
+  const note = renderCursorSenderNote(cliId, true, locale);
+  return note ? `${tag}\n${note}` : tag;
+}
+
 export function formatAttachmentsHint(attachments?: LarkAttachment[], locale?: Locale): string {
   if (!attachments || attachments.length === 0) return '';
   let imgN = 0, fileN = 0;

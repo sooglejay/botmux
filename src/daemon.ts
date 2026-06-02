@@ -94,7 +94,7 @@ import { EventLog as WorkflowEventLog } from './workflows/events/append.js';
 import { replay as replayWorkflow } from './workflows/events/replay.js';
 import { isBotMentioned, probeBotOpenId, startLarkEventDispatcher, writeBotInfoFile, canOperate, evaluateTalk, grantCommandRestriction, isKnownPeerBot, checkRequiredScopes, type RoutingContext, type TalkEvaluation } from './im/lark/event-dispatcher.js';
 import { learnFromMentions, resolveSender, flushIdentityCacheSync } from './im/lark/identity-cache.js';
-import { renderSenderTag } from './core/session-manager.js';
+import { renderBufferedSenderBlock } from './core/session-manager.js';
 import { markSessionActivity } from './core/session-activity.js';
 import { WorkflowEventWatcher, handleWorkflowFanoutEvent } from './workflows/fanout.js';
 import type { WorkflowRuntimeContext, WorkerSpawnFn } from './workflows/runtime.js';
@@ -2626,8 +2626,15 @@ async function handleThreadReply(data: any, ctx: RoutingContext): Promise<void> 
     // tell multi-user buffered messages apart after repo selection unlocks.
     const followUpSender = await getThreadSender();
     if (followUpSender?.openId && followUpSender.openId !== ds.pendingSender?.openId) {
-      const followUpSenderTag = renderSenderTag(followUpSender);
-      if (followUpSenderTag) enriched = `${followUpSenderTag}\n${enriched}`;
+      // This buffer folds into the opening <user_message> after repo selection,
+      // so pair the foreign sender tag with the cursor anti-echo note: without
+      // the adjacent note a cursor session sees an inline ou_xxx:name with no
+      // guard (the builder's own note only covers ds.pendingSender's top-level
+      // tag, and is absent entirely when pendingSender is undefined).
+      const followUpSenderBlock = renderBufferedSenderBlock(
+        followUpSender, getBot(larkAppId).config.cliId, localeForBot(larkAppId),
+      );
+      if (followUpSenderBlock) enriched = `${followUpSenderBlock}\n${enriched}`;
     }
     if (!ds.pendingFollowUps) ds.pendingFollowUps = [];
     ds.pendingFollowUps.push(enriched);
