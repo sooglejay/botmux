@@ -231,7 +231,7 @@ async function cmdWorkflowRun(rest: string[]): Promise<void> {
   console.log(`events: ${result.lastSnapshot.lastSeq}`);
   if (result.reason === 'awaiting-wait') {
     console.log(`awaiting-wait on: ${result.lastSnapshot.danglingWaits.join(', ')}`);
-    console.log(`(CLI 离线模式没有审批入口；从 IM 用 /workflow run 跑能拿到审批卡)`);
+    console.log(`(CLI 离线模式没有审批入口；从 IM 用 /template run 跑能拿到审批卡)`);
   }
   if (result.reason === 'terminal' && result.lastSnapshot.run.output) {
     console.log(`output: ${result.lastSnapshot.run.output.outputHash}`);
@@ -346,7 +346,7 @@ async function cmdWorkflowResume(rest: string[]): Promise<void> {
     errorMessage:
       `subagent '${input.botName}' (node=${input.nodeId}, activity=${input.activityId}) ` +
       `is not resumable via 'botmux workflow resume' — CLI does not spawn workers. ` +
-      `Use IM /workflow run for full execution, or restart the run.`,
+      `Use IM /template run for full execution, or restart the run.`,
   });
 
   const ctx: WorkflowRuntimeContext = {
@@ -366,7 +366,7 @@ async function cmdWorkflowResume(rest: string[]): Promise<void> {
   console.log(`events: ${result.lastSnapshot.lastSeq}`);
   if (result.reason === 'awaiting-wait') {
     console.log(`awaiting-wait on: ${result.lastSnapshot.danglingWaits.join(', ')}`);
-    console.log(`(CLI resume 不发卡；从 IM 用 /workflow run 进的话审批入口在那边)`);
+    console.log(`(CLI resume 不发卡；从 IM 用 /template run 进的话审批入口在那边)`);
   }
   if (result.reason === 'no-progress') {
     if (result.lastSnapshot.danglingEffectAttempted.length > 0) {
@@ -483,7 +483,7 @@ const cliResumeSpawnSubagent: WorkerSpawnFn = async (input) => ({
   errorMessage:
     `subagent '${input.botName}' (node=${input.nodeId}, activity=${input.activityId}) ` +
     `is not resumable via 'botmux workflow resume' — CLI does not spawn workers. ` +
-    `Use IM /workflow run for full execution, or restart the run.`,
+    `Use IM /template run for full execution, or restart the run.`,
 });
 
 async function loadRunWorkflowDefinition(

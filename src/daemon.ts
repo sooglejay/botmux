@@ -82,7 +82,11 @@ import type { CardHandlerDeps } from './im/lark/card-handler.js';
 import {
   executeWorkflowCommand,
   parseWorkflowCommand,
+  parseWorkflowGrillTrigger,
+  buildWorkflowGrillPrompt,
   resolveBotSnapshot,
+  WORKFLOW_USAGE,
+  WORKFLOW_V2_RENAME_NOTICE,
   type WorkflowCommandResult,
 } from './im/lark/workflow-slash-command.js';
 import { workflowRunDetailUrl } from './im/lark/workflow-cards.js';
@@ -1255,6 +1259,13 @@ async function handleWorkflowCommandIfAny(
   larkAppId: string,
   initiator: string | undefined,
 ): Promise<boolean> {
+  // 旧 `/workflow run|cancel` 软降级：在执行前**先**发改名提示，让迁移指引第一时间
+  // 到达用户（codex review：先发优于后发）。从原始 content 判定而非 parse 结果，
+  // 这样连 `/workflow run`（缺 id）这类 invalid legacy 也能收到提示（codex review）。
+  // 仅匹配 legacy 的 run|cancel（executeWorkflowCommand 必然 handle），不误伤 /template。
+  if (/^\/workflow\s+(run|cancel)\b/.test(content.trim())) {
+    await sessionReply(anchor, WORKFLOW_V2_RENAME_NOTICE, 'text', larkAppId);
+  }
   // Captured by the `onRunCreated` closure so the trailing text reply can be
   // suppressed when the run-level progress card already landed.  Codex
   // round 1 medium: "single self-updating tile" promise breaks if we also
@@ -1634,7 +1645,7 @@ ipcRoute('POST', '/api/workflows/definitions/:id/run', async (req, res, params) 
     }
   }
   // Convert JSON-channel params (decoded values) into the shared RawParamInput
-  // map.  String-channel coercion stays on the IM `/workflow run` path.
+  // map.  String-channel coercion stays on the IM `/template run` path.
   const rawParams: Record<string, RawParamInput> = {};
   for (const [k, v] of Object.entries((body.params as Record<string, unknown> | undefined) ?? {})) {
     rawParams[k] = { kind: 'json', value: v };
@@ -1903,13 +1914,31 @@ async function handleNewTopic(data: any, ctx: RoutingContext): Promise<void> {
   const botCfg = getBot(larkAppId).config;
   logger.info(`New session: "${content.substring(0, 60)}" (scope=${scope}, anchor=${anchor.substring(0, 12)}, resources: ${resources.length}, active: ${getActiveCount()}, messageId: ${messageId}, chatId: ${chatId})`);
 
-  if (parseWorkflowCommand(cmdContent)) {
+  // v3 即兴 grill：`/workflow [new] <目标>`。daemon 不拷问——把目标包成触发
+  // botmux-workflow skill 的 prompt（改写 content，promptContent 随后从 content
+  // 构造），fall-through 到正常 session 创建，让本话题 agent 接管整条链路。
+  // run|cancel 不在此命中（归 v2 legacy，由下面 handleWorkflowCommandIfAny 处理）。
+  const newTopicGrill = parseWorkflowGrillTrigger(cmdContent);
+  if (newTopicGrill) {
     if (await replyGrantRestrictionIfNeeded(larkAppId, chatId, senderOpenId, anchor, '/workflow')) {
       return;
     }
-  }
-  if (await handleWorkflowCommandIfAny(cmdContent, anchor, chatId, larkAppId, senderOpenId)) {
-    return;
+    if (newTopicGrill.kind === 'usage') {
+      await sessionReply(anchor, WORKFLOW_USAGE, 'text', larkAppId);
+      return;
+    }
+    content = buildWorkflowGrillPrompt(newTopicGrill.goal);
+    // 保留原 cmdContent（"/workflow new …"）供 title/日志；/workflow 非注册命令，
+    // 下面的 parseSlashCommandInvocation 会让它落到正常 spawn 路径。
+  } else {
+    if (parseWorkflowCommand(cmdContent)) {
+      if (await replyGrantRestrictionIfNeeded(larkAppId, chatId, senderOpenId, anchor, '/template')) {
+        return;
+      }
+    }
+    if (await handleWorkflowCommandIfAny(cmdContent, anchor, chatId, larkAppId, senderOpenId)) {
+      return;
+    }
   }
 
   // Intercept daemon commands in new topics (no session needed for some commands)
@@ -2401,7 +2430,9 @@ async function handleThreadReply(data: any, ctx: RoutingContext): Promise<void> 
     ? `${tr('daemon.foreign_bot_mention_prefix', { botName: foreignBotName! }, localeForBot(larkAppId))}\n`
     : '';
 
-  const promptContent = buildQuoteHint(parsed, scope, anchor) + botSenderPrefix + parsed.content;
+  // `let` (not const): the v3 grill gate below may replace this with a
+  // skill-trigger prompt when the user sends `/workflow [new] <目标>` mid-thread.
+  let promptContent = buildQuoteHint(parsed, scope, anchor) + botSenderPrefix + parsed.content;
   if (isForeignBot) {
     logger.info(
       `[${larkAppId}] foreign-bot @mention prefix attached: sender=${senderOpenIdForPrefix?.substring(0, 12)} ` +
@@ -2459,19 +2490,35 @@ async function handleThreadReply(data: any, ctx: RoutingContext): Promise<void> 
     }
   }
 
-  if (parseWorkflowCommand(cmdContent)) {
+  // v3 即兴 grill（thread 内）：`/workflow [new] <目标>` → 把目标包成触发
+  // botmux-workflow skill 的 prompt 覆盖 promptContent，fall-through 到下面正常
+  // 转发逻辑，让现有/新建的 agent 接管。run|cancel 归 v2 legacy（走 else）。
+  const threadGrill = parseWorkflowGrillTrigger(cmdContent);
+  if (threadGrill) {
     if (await replyGrantRestrictionIfNeeded(larkAppId, threadChatId, threadSenderOpenId, anchor, '/workflow')) {
       return;
     }
-  }
-  if (await handleWorkflowCommandIfAny(
-    cmdContent,
-    anchor,
-    threadChatId,
-    larkAppId,
-    threadSenderOpenId,
-  )) {
-    return;
+    if (threadGrill.kind === 'usage') {
+      await sessionReply(anchor, WORKFLOW_USAGE, 'text', larkAppId);
+      return;
+    }
+    promptContent = buildWorkflowGrillPrompt(threadGrill.goal);
+    // fall through to normal forwarding with the rewritten promptContent
+  } else {
+    if (parseWorkflowCommand(cmdContent)) {
+      if (await replyGrantRestrictionIfNeeded(larkAppId, threadChatId, threadSenderOpenId, anchor, '/template')) {
+        return;
+      }
+    }
+    if (await handleWorkflowCommandIfAny(
+      cmdContent,
+      anchor,
+      threadChatId,
+      larkAppId,
+      threadSenderOpenId,
+    )) {
+      return;
+    }
   }
 
   // Intercept daemon commands

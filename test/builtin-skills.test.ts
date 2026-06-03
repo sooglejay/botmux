@@ -114,8 +114,8 @@ describe('built-in botmux-workflow skill (v3 grill → 编排 → 跑)', () => {
     // 防误触发 + 两道 gate
     expect(skill!.content).toContain('Gate-1');
     expect(skill!.content).toContain('Gate-2');
-    // 跟 v0.2 / workflow-create 区分
-    expect(skill!.content).toContain('/workflow run <id>');
+    // 跟 v0.2 / workflow-create 区分（v2 模板入口已改名 /template）
+    expect(skill!.content).toContain('/template run <id>');
     expect(skill!.content).toContain('botmux-workflow-create');
     // 转义没出 bug：description 里不该出现裸反斜杠-反引号
     expect(skill!.content).not.toContain('\\`');
