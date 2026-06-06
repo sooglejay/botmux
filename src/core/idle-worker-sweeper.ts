@@ -31,6 +31,15 @@ export function sweepIdleWorkers(
   if (running.length <= maxLiveWorkers) return [];
 
   const candidates = running
+    // Never suspend an adopted session. forkAdoptWorker stamps its
+    // initConfig.backendType as tmux/herdr/zellij (so it would otherwise pass
+    // isSuspendableBackendType), but the worker-null resume path in daemon.ts
+    // re-forks via forkWorker — NOT forkAdoptWorker — so a suspended adopt
+    // session would come back as a normal botmux bmx-* session, losing its
+    // observe/bridge semantics and pushing wrapped messages into the user's
+    // un-injected external CLI. Check both the runtime mirror and the persisted
+    // marker so a restored adopt session is excluded too.
+    .filter(ds => !ds.adoptedFrom && !ds.session.adoptedFrom)
     .filter(ds => isSuspendableBackendType(ds.initConfig?.backendType))
     .filter(ds => ds.lastScreenStatus === 'idle')
     .filter(ds => now - (ds.lastMessageAt || 0) >= idleMs)

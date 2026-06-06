@@ -162,4 +162,57 @@ describe('sweepIdleWorkers', () => {
     expect(activeSessions.get('c').worker).not.toBe(null);
     expect(activeSessions.get('d').worker).not.toBe(null);
   });
+
+  it('never suspends adopt sessions even when idle, over-budget, and on a suspendable backend', () => {
+    const now = 1_000_000;
+    // 'a' and 'b' are the oldest idle workers — without the adopt guard they
+    // would be the first picked. They are adopt sessions (one marked via the
+    // runtime mirror ds.adoptedFrom, one via the persisted ds.session.adoptedFrom)
+    // so they must be skipped; the sweeper falls through to the oldest *normal*
+    // sessions ('c', 'd') instead. Suspending an adopt session would break it:
+    // the worker-null resume path re-forks via forkWorker, not forkAdoptWorker.
+    const adoptRuntime = { ...ds('a', 'tmux', now - 90 * 60_000), adoptedFrom: { tmuxTarget: 'user:0.1' } };
+    const adoptPersisted = ds('b', 'herdr', now - 80 * 60_000);
+    adoptPersisted.session.adoptedFrom = { herdrTarget: 'user-herdr' };
+    const activeSessions = new Map<string, any>([
+      ['a', adoptRuntime],
+      ['b', adoptPersisted],
+      ['c', ds('c', 'zellij', now - 70 * 60_000)],
+      ['d', ds('d', 'tmux', now - 60 * 60_000)],
+      ['e', ds('e', 'herdr', now - 50 * 60_000)],
+      ['f', ds('f', 'zellij', now - 40 * 60_000)],
+      ['g', ds('g', 'tmux', now - 35 * 60_000)],
+      ['h', ds('h', 'herdr', now - 31 * 60_000)],
+      ['i', ds('i', 'zellij', now - 30 * 60_000)],
+      ['j', ds('j', 'tmux', now - 2 * 60_000)],
+    ]);
+
+    const suspended = sweepIdleWorkers(activeSessions, {
+      now,
+      workerBudget: { maxLiveWorkers: 8, idleSuspendMs: 30 * 60_000 },
+    });
+
+    expect(suspended.map(s => s.sessionId)).toEqual(['c', 'd']);
+    expect(activeSessions.get('a').worker).not.toBe(null);
+    expect(activeSessions.get('b').worker).not.toBe(null);
+  });
+
+  it('does not suspend an adopt session even if it is the only over-budget candidate', () => {
+    const now = 1_000_000;
+    // Budget 1, but the single eligible-looking over-budget worker is an adopt
+    // session → nothing is suspended (an adopt session is never a candidate).
+    const adopt = { ...ds('a', 'tmux', now - 90 * 60_000), adoptedFrom: { tmuxTarget: 'user:0.1' } };
+    const activeSessions = new Map<string, any>([
+      ['a', adopt],
+      ['b', ds('b', 'tmux', now - 2 * 60_000)], // recent, under idle threshold
+    ]);
+
+    const suspended = sweepIdleWorkers(activeSessions, {
+      now,
+      workerBudget: { maxLiveWorkers: 1, idleSuspendMs: 30 * 60_000 },
+    });
+
+    expect(suspended).toEqual([]);
+    expect(activeSessions.get('a').worker).not.toBe(null);
+  });
 });
