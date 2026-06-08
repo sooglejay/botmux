@@ -1690,3 +1690,46 @@ export function buildCodexAppThreadSelectCard(threads: CodexAppThreadSummary[], 
   };
   return JSON.stringify(card);
 }
+
+// ── Sandbox landing card (owner reviews the sandbox clone's diff, then applies
+//    it back to the real repo). Owner-gated apply; the agent never sees this. ──
+export interface LandCardOpts {
+  sessionId: string;
+  workingDir: string;
+  statText: string;
+  files: number;
+  insertions: number;
+  deletions: number;
+  preview: string;   // truncated patch text
+}
+
+export function buildLandCard(o: LandCardOpts, locale?: Locale): string {
+  const v = { sessionId: o.sessionId, workingDir: o.workingDir };
+  const body = t('card.land.body', { files: o.files, ins: o.insertions, del: o.deletions, dir: escapeMd(o.workingDir) }, locale);
+  const elements: any[] = [{ tag: 'div', text: { tag: 'lark_md', content: body } }];
+  if (o.statText) elements.push({ tag: 'div', text: { tag: 'lark_md', content: `**${t('card.land.files_header', undefined, locale)}**\n` + '```\n' + o.statText.slice(0, 1500) + '\n```' } });
+  if (o.preview) elements.push({ tag: 'div', text: { tag: 'lark_md', content: `**${t('card.land.preview_header', undefined, locale)}**\n` + '```diff\n' + o.preview + '\n```' } });
+  elements.push(
+    { tag: 'hr' },
+    { tag: 'action', actions: [
+      { tag: 'button', type: 'primary', text: { tag: 'plain_text', content: t('card.land.btn_apply', undefined, locale) }, value: { action: 'land_apply', ...v } },
+      { tag: 'button', type: 'danger', text: { tag: 'plain_text', content: t('card.land.btn_discard', undefined, locale) }, value: { action: 'land_discard', ...v } },
+    ] },
+    { tag: 'note', elements: [{ tag: 'lark_md', content: t('card.land.note', undefined, locale) }] },
+  );
+  return JSON.stringify({ config: { wide_screen_mode: true }, header: { template: 'turquoise', title: { tag: 'plain_text', content: t('card.land.title', undefined, locale) } }, elements });
+}
+
+export function buildLandResultCard(kind: 'applied' | 'discarded' | 'failed', detail: string, locale?: Locale): string {
+  const meta = {
+    applied: { template: 'green', titleKey: 'card.land.applied_title' },
+    discarded: { template: 'grey', titleKey: 'card.land.discarded_title' },
+    failed: { template: 'red', titleKey: 'card.land.failed_title' },
+  }[kind];
+  const body = detail || (kind === 'discarded' ? t('card.land.discarded_body', undefined, locale) : '');
+  return JSON.stringify({
+    config: { wide_screen_mode: true },
+    header: { template: meta.template, title: { tag: 'plain_text', content: t(meta.titleKey, undefined, locale) } },
+    elements: [{ tag: 'div', text: { tag: 'lark_md', content: body } }],
+  });
+}
