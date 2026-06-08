@@ -28,7 +28,8 @@ import { getRunsDir } from './workflows/runs-dir.js';
 import { BotOnboardingManager } from './dashboard/bot-onboarding.js';
 import { CLI_OPTIONS, resolveCliId } from './setup/bot-config-editor.js';
 import { invalidWorkingDirs } from './utils/working-dir.js';
-import { mergeDashboardConfig, mergeMaintenanceConfig, parseMaintenancePatch, readGlobalConfig, type DashboardGlobalConfig, type MaintenanceConfig } from './global-config.js';
+import { mergeDashboardConfig, mergeMaintenanceConfig, parseMaintenancePatch, readGlobalConfig, setGlobalLocale, type DashboardGlobalConfig, type MaintenanceConfig } from './global-config.js';
+import { isLocale } from './i18n/types.js';
 import { isLocalDevInstall } from './utils/install-info.js';
 import type { CliId } from './adapters/cli/types.js';
 import type { ConnectorDefinition } from './services/connector-store.js';
@@ -455,7 +456,10 @@ const server = createServer(async (req, res) => {
       // `authed` lets the Settings page disable toggles for read-only
       // visitors up front, instead of letting them flip a switch that
       // 401s + rolls back on save.
-      return jsonRes(res, 200, { settings: dashboardSettings, authed });
+      // `lang` is the global UI locale (single source of truth shared with
+      // `botmux lang` and the Feishu cards) — the web UI reads it as its
+      // authoritative initial language when set.
+      return jsonRes(res, 200, { settings: dashboardSettings, lang: readGlobalConfig().lang ?? null, authed });
     }
     if (req.method === 'PUT' && url.pathname === '/api/settings') {
       let parsed: unknown;
@@ -492,6 +496,20 @@ const server = createServer(async (req, res) => {
           if (!autoUpdateOn) return jsonRes(res, 400, { ok: false, error: 'autoupdate_required' });
         }
         mergeMaintenanceConfig(r.patch);
+        touched = true;
+      }
+      if ('lang' in body) {
+        // Global UI locale — single source of truth shared with `botmux lang`
+        // and the Feishu cards. Persist to ~/.botmux/config.json, then fan out
+        // to every online daemon over the same IPC bus the per-bot config
+        // writes use, so running cards switch language live (no restart).
+        const v = body.lang;
+        if (v === null) setGlobalLocale(null);
+        else if (isLocale(v)) setGlobalLocale(v);
+        else return jsonRes(res, 400, { ok: false, error: 'invalid_lang' });
+        await Promise.all(registry.list().map(d =>
+          fetch(`http://127.0.0.1:${d.ipcPort}/api/locale/reload`, { method: 'POST' }).catch(() => undefined),
+        ));
         touched = true;
       }
       if (!touched) return jsonRes(res, 400, { ok: false, error: 'empty_patch' });

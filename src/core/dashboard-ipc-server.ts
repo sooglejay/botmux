@@ -14,6 +14,10 @@ import * as grantPrefsStore from '../services/grant-prefs-store.js';
 import { findConfigField, applyConfigField } from '../services/bot-config-store.js';
 import { config } from '../config.js';
 import { computeSandboxDiff, applySandboxDiff } from '../services/sandbox-land.js';
+import { readRawConfig, findEntryIndex, requireConfigPath } from '../services/config-store.js';
+import { setDefaultLocale } from '../i18n/index.js';
+import { isLocale, type Locale } from '../i18n/types.js';
+import { readGlobalConfig } from '../global-config.js';
 import { normalizeChatReplyMode, type ChatReplyMode } from '../services/chat-reply-mode-store.js';
 import * as chatFirstSeenStore from '../services/chat-first-seen-store.js';
 import * as scheduler from './scheduler.js';
@@ -771,6 +775,32 @@ ipcRoute('PUT', '/api/bot-sandbox', async (req, res) => {
   const r = await sandboxStore.updateBotSandbox(cachedLarkAppId, body.enabled === true);
   if (!r.ok) return jsonRes(res, 400, { ok: false, error: r.reason });
   jsonRes(res, 200, { ok: true, sandbox: r.sandbox });
+});
+
+// 实时切换 UI 语言（locale），无需重启 daemon。`botmux lang` / Dashboard 语言开关
+// 写盘后 POST 这个端点，让本 daemon 从磁盘重新读 locale 并热更新：
+//   • 全局默认（~/.botmux/config.json 的 `lang`）→ setDefaultLocale（缺省回落 'zh'）；
+//   • 本 bot 的 per-bot 覆盖（bots.json 的 `lang`）→ 同步进内存 bot.config.lang
+//     （与 applyConfigField 同口径），让 `botmux lang --bot N` 跨进程写入也免重启。
+// 卡片都在 daemon 端按消息实时渲染（localeForBot），所以下一条消息/卡片立即生效。
+// 文件是单一事实源，本端点只是“立即重读”信号——不在此落盘（写入方已落盘）。
+ipcRoute('POST', '/api/locale/reload', async (_req, res) => {
+  const globalLang = readGlobalConfig().lang;
+  const resolvedDefault: Locale = isLocale(globalLang) ? globalLang : 'zh';
+  setDefaultLocale(resolvedDefault);
+
+  let botLang: Locale | null = null;
+  if (cachedLarkAppId) {
+    try {
+      const raw = await readRawConfig(requireConfigPath());
+      const idx = findEntryIndex(raw, cachedLarkAppId);
+      const entryLang = idx >= 0 ? raw[idx]?.lang : undefined;
+      botLang = isLocale(entryLang) ? entryLang : null;
+      getBot(cachedLarkAppId).config.lang = botLang ?? undefined;
+    } catch { /* bot 未注册 / 读盘失败：全局已应用，per-bot 维持原值 */ }
+  }
+
+  jsonRes(res, 200, { ok: true, defaultLocale: resolvedDefault, botLang });
 });
 
 ipcRoute('PUT', '/api/bot-default-oncall', async (req, res) => {

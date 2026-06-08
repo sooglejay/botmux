@@ -134,6 +134,23 @@ describe('SSE /api/events', () => {
   }, 5_000);
 });
 
+describe('POST /api/locale/reload', () => {
+  it('hot-reloads the process default locale from disk and reports it', async () => {
+    setLarkAppId('');  // no registered bot → per-bot override path stays null
+    handle = await startIpcServer({ port: 0, host: '127.0.0.1' });
+    const res = await fetch(`http://127.0.0.1:${handle.port}/api/locale/reload`, { method: 'POST' });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.ok).toBe(true);
+    expect(['zh', 'en']).toContain(body.defaultLocale);
+    expect(body.botLang).toBeNull();
+    // The route applied it in-process: getDefaultLocale reflects the same value
+    // (same i18n module singleton the daemon's card rendering reads).
+    const { getDefaultLocale } = await import('../src/i18n/index.js');
+    expect(getDefaultLocale()).toBe(body.defaultLocale);
+  });
+});
+
 describe('GET /api/groups (Phase B)', () => {
   it('returns 503 when larkAppId not set', async () => {
     setLarkAppId('');

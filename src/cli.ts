@@ -4474,6 +4474,37 @@ async function cmdBots(sub: string, rest: string[]): Promise<void> {
 
 // ─── botmux lang ─────────────────────────────────────────────────────────────
 
+/** Notify every online daemon to hot-reload its UI locale from disk, so a
+ *  `botmux lang` change takes effect on live cards without a restart. Best
+ *  effort: unreachable daemons pick up the new value when they next restart. */
+async function notifyDaemonsReloadLocale(): Promise<{ notified: number; failed: number }> {
+  const daemons = listOnlineDaemons();
+  let notified = 0;
+  let failed = 0;
+  await Promise.all(daemons.map(async (d) => {
+    try {
+      const r = await fetch(`http://127.0.0.1:${d.ipcPort}/api/locale/reload`, { method: 'POST' });
+      if (r.ok) notified++;
+      else failed++;
+    } catch { failed++; }
+  }));
+  return { notified, failed };
+}
+
+/** Fan the locale change out to live daemons and tell the user whether it took
+ *  effect immediately or will apply on next daemon start. */
+async function reportLocaleApplied(): Promise<void> {
+  const { notified, failed } = await notifyDaemonsReloadLocale();
+  if (notified > 0) {
+    console.log(`✅ Applied live to ${notified} running daemon(s) — no restart needed.`);
+  } else {
+    console.log(`No running daemon to notify; the change applies when daemons next start.`);
+  }
+  if (failed > 0) {
+    console.log(`(${failed} daemon(s) did not acknowledge; they'll pick it up on restart.)`);
+  }
+}
+
 /**
  * `botmux lang [zh|en] [--bot N] [--unset]`
  *
@@ -4483,9 +4514,11 @@ async function cmdBots(sub: string, rest: string[]): Promise<void> {
  * `--unset` → clear the global config's `lang` (or, with `--bot N`, drop
  *   the per-bot override).
  *
- * On any write, hint the user to `botmux restart` so live daemons pick it up.
+ * On any write, notify online daemons to hot-reload the locale (no restart) —
+ * cards switch language on the next message; the change still persists for
+ * future restarts.
  */
-function cmdLang(args: string[]): void {
+async function cmdLang(args: string[]): Promise<void> {
   ensureConfigDir();
   const cfg = readGlobalConfig();
   const globalLang: Locale | undefined = cfg.lang;
@@ -4540,7 +4573,7 @@ function cmdLang(args: string[]): void {
       writeBotsJsonAtomic(bots);
       console.log(`✅ Set bot ${botFlag} (${bots[botFlag].larkAppId}) lang → ${target}.`);
     }
-    console.log(`Run \`botmux restart\` for changes to take effect.`);
+    await reportLocaleApplied();
     return;
   }
 
@@ -4548,7 +4581,7 @@ function cmdLang(args: string[]): void {
   if (unset) {
     setGlobalLocale(null);
     console.log(`✅ Cleared global lang (will default to zh).`);
-    console.log(`Run \`botmux restart\` for changes to take effect.`);
+    await reportLocaleApplied();
     return;
   }
 
@@ -4559,7 +4592,7 @@ function cmdLang(args: string[]): void {
   }
   setGlobalLocale(target);
   console.log(`✅ Set global lang → ${target}.`);
-  console.log(`Run \`botmux restart\` for changes to take effect.`);
+  await reportLocaleApplied();
 }
 
 // ─── botmux worker-budget ───────────────────────────────────────────────────
@@ -5003,7 +5036,7 @@ switch (command) {
   case 'preset':   await cmdPreset(process.argv[3] ?? '', process.argv.slice(4)); break;
   case 'history':  await cmdHistory(process.argv.slice(3)); break;
   case 'quoted':   await cmdQuoted(process.argv.slice(3)); break;
-  case 'lang':     cmdLang(process.argv.slice(3)); break;
+  case 'lang':     await cmdLang(process.argv.slice(3)); break;
   case 'voice':    await cmdVoiceSetup(process.argv.slice(3)); break;
   case 'worker-budget': cmdWorkerBudget(process.argv.slice(3)); break;
   case 'thread':   {
