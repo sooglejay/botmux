@@ -139,6 +139,21 @@ describe('v3 early-release / loser cancellation', () => {
     expect(materialize(events).nodes.get('b')?.status).toBe('cancelled');
   });
 
+  it('materialize: 取消 A#001 不压制 A#002 的成功(instance 化 cancel)', () => {
+    const events: StoredEvent[] = [
+      { ts: 1, type: 'runStarted', runId: 'cancel-instance' },
+      { ts: 2, type: 'nodeDispatched', nodeId: 'A', instanceId: 'A#001', attemptId: 'A#001/attempts/001' },
+      { ts: 3, type: 'nodeCancelled', nodeId: 'A', instanceId: 'A#001', attemptId: 'A#001/attempts/001', reason: 'earlyReleaseLoser', byNodeId: 'm' },
+      // 回溯后重生的 A#002 正常成功 —— 旧 A#001 的 cancel 不能把它压成 cancelled。
+      { ts: 4, type: 'nodeDispatched', nodeId: 'A', instanceId: 'A#002', attemptId: 'A#002/attempts/001' },
+      { ts: 5, type: 'nodeSucceeded', nodeId: 'A', instanceId: 'A#002', attemptId: 'A#002/attempts/001', manifestPath: '/tmp/m.json' },
+    ];
+    const snap = materialize(events);
+    expect(snap.instances.get('A#001')?.status).toBe('cancelled');
+    expect(snap.instances.get('A#002')?.status).toBe('done');
+    expect(snap.nodes.get('A')?.status).toBe('done'); // 节点视图 = 当前 effective A#002
+  });
+
   it('runtime: 三路赛马 one_success，赢家发车，败者 abort 后失败不污染终态', async () => {
     const base = mkdtempSync(join(tmpdir(), 'v3-early-runtime-'));
     try {

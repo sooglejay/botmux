@@ -137,9 +137,11 @@ export function materialize(events: StoredEvent[]): V3RunSnapshot {
       status === 'blocked';
   };
 
-  const cancelledCovers = (nodeId: string, attemptId?: string): boolean => {
-    if (!cancelledAttempts.has(nodeId)) return false;
-    const cancelledAttemptId = cancelledAttempts.get(nodeId);
+  // Keyed by `(instanceId ?? nodeId)` so cancelling `A#001` (an early-release
+  // loser) never suppresses `A#002`'s settle after a revisit re-dispatch.
+  const cancelledCovers = (key: string, attemptId?: string): boolean => {
+    if (!cancelledAttempts.has(key)) return false;
+    const cancelledAttemptId = cancelledAttempts.get(key);
     return cancelledAttemptId === undefined || cancelledAttemptId === attemptId;
   };
 
@@ -149,24 +151,30 @@ export function materialize(events: StoredEvent[]): V3RunSnapshot {
         runStatus = 'running';
         break;
       case 'nodeDispatched':
-        if (nodes.get(e.nodeId)?.status === 'cancelled') break;
+        // Don't resurrect a cancelled early-release loser via a late dispatch.
+        // Instance-aware: only the SAME cancelled instance is blocked — a fresh
+        // instance (`A#002` after a revisit) dispatches even though `A#001` was
+        // cancelled.  Legacy (no instance) keeps the node-view guard.
+        if (e.instanceId) {
+          if (instances.get(e.instanceId)?.status === 'cancelled') break;
+        } else if (nodes.get(e.nodeId)?.status === 'cancelled') break;
         // Dispatch makes this instance the node's effective one.
         if (e.instanceId) recordInstance(e.nodeId, e.instanceId, 'running', true);
         else set(e.nodeId, 'running');
         attempts.set(e.instanceId ?? e.nodeId, e.attemptId); // constraint 3: key by instance when present
         break;
       case 'nodeSucceeded':
-        if (cancelledCovers(e.nodeId, e.attemptId)) break;
+        if (cancelledCovers(e.instanceId ?? e.nodeId, e.attemptId)) break;
         if (e.instanceId) recordInstance(e.nodeId, e.instanceId, 'done', false);
         else set(e.nodeId, 'done');
         break;
       case 'nodeFailed':
-        if (cancelledCovers(e.nodeId, e.attemptId)) break;
+        if (cancelledCovers(e.instanceId ?? e.nodeId, e.attemptId)) break;
         if (e.instanceId) recordInstance(e.nodeId, e.instanceId, 'failed', false);
         else set(e.nodeId, 'failed');
         break;
       case 'nodeBlocked':
-        if (cancelledCovers(e.nodeId, e.attemptId)) break;
+        if (cancelledCovers(e.instanceId ?? e.nodeId, e.attemptId)) break;
         if (e.instanceId) recordInstance(e.nodeId, e.instanceId, 'blocked', false);
         else set(e.nodeId, 'blocked');
         break;
@@ -252,8 +260,10 @@ export function materialize(events: StoredEvent[]): V3RunSnapshot {
         break;
       case 'nodeCancelled':
         if (terminal(e.nodeId)) break;
-        cancelledAttempts.set(e.nodeId, e.attemptId);
-        set(e.nodeId, 'cancelled');
+        // Suppress by instance (or nodeId fallback) so a later instance settles freely.
+        cancelledAttempts.set(e.instanceId ?? e.nodeId, e.attemptId);
+        if (e.instanceId) recordInstance(e.nodeId, e.instanceId, 'cancelled', false);
+        else set(e.nodeId, 'cancelled');
         break;
       case 'runSucceeded':
         runStatus = 'succeeded';

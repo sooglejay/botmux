@@ -1223,10 +1223,14 @@ export async function runWorkflow(
     const status = snap.nodes.get(a.nodeId)?.status ?? 'pending';
     if (status !== 'pending' && status !== 'gateWaiting' && status !== 'running') return false;
 
-    const attemptId = latestAttemptIdFor(events, a.nodeId);
+    // Stamp the cancelled INSTANCE so a later instance (`A#002` after a revisit)
+    // settles freely — the cancel suppression in materialize keys by instance.
+    const instanceId = snap.nodes.get(a.nodeId)?.effectiveInstanceId;
+    const attemptId = latestAttemptIdFor(events, instanceId ?? a.nodeId);
     appendEvent(journalPath, {
       type: 'nodeCancelled',
       nodeId: a.nodeId,
+      ...(instanceId ? { instanceId } : {}),
       attemptId,
       reason: 'earlyReleaseLoser',
       byNodeId: a.byNodeId,
