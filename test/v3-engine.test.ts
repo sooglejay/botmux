@@ -485,18 +485,37 @@ describe('journal + state', () => {
     expect(snap.nodes.get('C')).toEqual({ status: 'pending' });
   });
 
-  it('instance 层: 重派 A#002 后 effective 指向新实例; 旧实例迟到 settle 不复活节点', () => {
+  it('instance 层: 重派 A#002 后 effective 指向新实例; 旧实例迟到 settle 不复活、不解冻刷新态', () => {
     const snap = materialize([
       { ts: 1, type: 'nodeDispatched', nodeId: 'A', instanceId: 'A#001', attemptId: 'A#001/attempts/001' },
       { ts: 2, type: 'nodeInstanceSuperseded', nodeId: 'A', instanceId: 'A#001', byNodeId: 'A', reason: 'refresh' },
       { ts: 3, type: 'nodeDispatched', nodeId: 'A', instanceId: 'A#002', attemptId: 'A#002/attempts/001' },
-      // 旧实例 A#001 的迟到成功（不该把节点拉回 done — 它已被 supersede）
+      // 旧实例 A#001 的迟到成功（不该把节点拉回 done，也不该把 A#001 从 superseded 变 done）
       { ts: 4, type: 'nodeSucceeded', nodeId: 'A', instanceId: 'A#001', attemptId: 'A#001/attempts/001', manifestPath: '/stale' },
     ]);
     expect(snap.nodes.get('A')).toEqual({ status: 'running', effectiveInstanceId: 'A#002' });
     expect(snap.instances.get('A#002')!.status).toBe('running');
-    // 迟到 settle 记到旧 instance, 但不动节点 effective 视图
-    expect(snap.instances.get('A#001')!.status).toBe('done');
+    // 迟到 settle 不能解冻刷新态：A#001 仍是 superseded（菲菲 review blocker 1）
+    expect(snap.instances.get('A#001')!.status).toBe('superseded');
+  });
+
+  it('instance 层: gate 挂 instance — A#001 批准不污染 A#002（约束6）', () => {
+    const snap = materialize([
+      // A#001 的 gate 批准 → A#001 instance gateCleared
+      { ts: 1, type: 'gateDispatched', nodeId: 'A', instanceId: 'A#001', waitId: 'w1' },
+      { ts: 2, type: 'gateResolved', nodeId: 'A', instanceId: 'A#001', waitId: 'w1', resolution: 'approved', by: 'u' },
+      // A#001 被回溯刷新
+      { ts: 3, type: 'nodeInstanceSuperseded', nodeId: 'A', instanceId: 'A#001', byNodeId: 'A', reason: 'refresh' },
+      // 新实例 A#002 的 gate 重新派发（尚未批准）
+      { ts: 4, type: 'gateDispatched', nodeId: 'A', instanceId: 'A#002', waitId: 'w2' },
+    ]);
+    // A#001 先被批准(pending+gateCleared)再被回溯刷新 → 终态 superseded（刷新态冻结）
+    expect(snap.instances.get('A#001')!.status).toBe('superseded');
+    expect(snap.instances.get('A#002')!.status).toBe('gateWaiting');
+    // 节点视图跟最新 effective 实例 A#002：在等审批，gateCleared 没被 A#001 的批准污染
+    expect(snap.nodes.get('A')!.status).toBe('gateWaiting');
+    expect(snap.nodes.get('A')!.effectiveInstanceId).toBe('A#002');
+    expect(snap.nodes.get('A')!.gateCleared).toBeUndefined();
   });
 });
 

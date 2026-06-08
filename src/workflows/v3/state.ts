@@ -104,6 +104,10 @@ export function materialize(events: StoredEvent[]): V3RunSnapshot {
   // (loop body expansions, pre-instance-layer) skip this entirely and keep the
   // plain nodeId-keyed behavior above.
   const recordInstance = (nodeId: string, instanceId: string, status: V3NodeStatus, makeEffective: boolean): void => {
+    // A superseded instance is FROZEN: a stale late settle from its old worker
+    // (nodeSucceeded/Failed/Blocked) must NOT revive it to done/failed — the
+    // refresh state is what the dashboard shows (菲菲 review blocker 1).
+    if (instances.get(instanceId)?.status === 'superseded') return;
     instances.set(instanceId, { status });
     if (makeEffective) {
       const prev = nodes.get(nodeId);
@@ -205,13 +209,28 @@ export function materialize(events: StoredEvent[]): V3RunSnapshot {
       }
       case 'gateDispatched':
         if (nodes.get(e.nodeId)?.status === 'cancelled') break;
-        set(e.nodeId, 'gateWaiting');
+        // Gate is per-INSTANCE (constraint 6): A#001's approval must not clear
+        // A#002.  When the event carries instanceId, the gate state lives on
+        // the instance + (when effective) mirrors to the node.
+        if (e.instanceId) {
+          instances.set(e.instanceId, { status: 'gateWaiting' });
+          nodes.set(e.nodeId, { ...(nodes.get(e.nodeId) ?? {}), status: 'gateWaiting', effectiveInstanceId: e.instanceId });
+        } else set(e.nodeId, 'gateWaiting');
         break;
-      case 'gateResolved':
+      case 'gateResolved': {
         if (nodes.get(e.nodeId)?.status === 'cancelled') break;
-        if (e.resolution === 'approved') set(e.nodeId, 'pending', true);
+        const approved = e.resolution === 'approved';
+        if (e.instanceId) {
+          instances.set(e.instanceId, approved ? { status: 'pending', gateCleared: true } : { status: 'failed' });
+          // Only mirror to the node view if this instance is the live one.
+          if (nodes.get(e.nodeId)?.effectiveInstanceId === e.instanceId) {
+            const prev = nodes.get(e.nodeId)!;
+            nodes.set(e.nodeId, approved ? { ...prev, status: 'pending', gateCleared: true } : { ...prev, status: 'failed' });
+          }
+        } else if (approved) set(e.nodeId, 'pending', true);
         else set(e.nodeId, 'failed');
         break;
+      }
       case 'edgeResolved': {
         const key = `${e.from}->${e.to}`;
         if (!edges.has(key)) {
