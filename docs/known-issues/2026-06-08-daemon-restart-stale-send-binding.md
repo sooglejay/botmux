@@ -10,7 +10,7 @@
 全局 `botmux send`（甚至 `botmux send --help`）会立即失败：
 
 ```
-未找到 session {"sessionId":"3a7e0a71-...","turnId":"om_x100b6d5360b2b02cc1d6c730c6c6ce6"}
+未找到 session {"sessionId":"<session-uuid>","turnId":"<turn-message-id>"}
 ```
 
 - 报错里的 `sessionId` 在 `botmux list` 里**确实存在且 status=online**；
