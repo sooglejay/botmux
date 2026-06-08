@@ -449,6 +449,55 @@ describe('journal + state', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it('instance 层: dispatch 带 instanceId → instances + effectiveInstanceId', () => {
+    const snap = materialize([
+      { ts: 1, type: 'nodeDispatched', nodeId: 'A', instanceId: 'A#001', attemptId: 'A#001/attempts/001' },
+      { ts: 2, type: 'nodeSucceeded', nodeId: 'A', instanceId: 'A#001', attemptId: 'A#001/attempts/001', manifestPath: '/x' },
+    ]);
+    expect(snap.nodes.get('A')).toEqual({ status: 'done', effectiveInstanceId: 'A#001' });
+    expect(snap.instances.get('A#001')!.status).toBe('done');
+    // attempts keyed by instanceId (constraint 3)
+    expect(snap.attempts.get('A#001')).toBe('A#001/attempts/001');
+  });
+
+  it('instance 层: revisit supersede 把目标+下游 instance 刷新, 节点回 pending', () => {
+    // A -> B -> C 首轮全成功, C#001 回溯 A → A/B/C #001 全 superseded.
+    const snap = materialize([
+      { ts: 1, type: 'nodeDispatched', nodeId: 'A', instanceId: 'A#001', attemptId: 'A#001/attempts/001' },
+      { ts: 2, type: 'nodeSucceeded', nodeId: 'A', instanceId: 'A#001', attemptId: 'A#001/attempts/001', manifestPath: '/a' },
+      { ts: 3, type: 'nodeDispatched', nodeId: 'B', instanceId: 'B#001', attemptId: 'B#001/attempts/001' },
+      { ts: 4, type: 'nodeSucceeded', nodeId: 'B', instanceId: 'B#001', attemptId: 'B#001/attempts/001', manifestPath: '/b' },
+      { ts: 5, type: 'nodeDispatched', nodeId: 'C', instanceId: 'C#001', attemptId: 'C#001/attempts/001' },
+      { ts: 6, type: 'nodeSucceeded', nodeId: 'C', instanceId: 'C#001', attemptId: 'C#001/attempts/001', manifestPath: '/c' },
+      { ts: 7, type: 'nodeRevisitRequested', nodeId: 'C', instanceId: 'C#001', attemptId: 'C#001/attempts/001', toNodeId: 'A', reason: '缺信息' },
+      { ts: 8, type: 'nodeInstanceSuperseded', nodeId: 'A', instanceId: 'A#001', byNodeId: 'A', reason: 'refresh' },
+      { ts: 9, type: 'nodeInstanceSuperseded', nodeId: 'B', instanceId: 'B#001', byNodeId: 'A', reason: 'refresh' },
+      { ts: 10, type: 'nodeInstanceSuperseded', nodeId: 'C', instanceId: 'C#001', byNodeId: 'A', reason: 'refresh' },
+    ]);
+    // 旧 instance 全 superseded
+    expect(snap.instances.get('A#001')!.status).toBe('superseded');
+    expect(snap.instances.get('B#001')!.status).toBe('superseded');
+    expect(snap.instances.get('C#001')!.status).toBe('superseded');
+    // 节点回 pending、effective 清空 → decideNext 会重派 #002
+    expect(snap.nodes.get('A')).toEqual({ status: 'pending' });
+    expect(snap.nodes.get('B')).toEqual({ status: 'pending' });
+    expect(snap.nodes.get('C')).toEqual({ status: 'pending' });
+  });
+
+  it('instance 层: 重派 A#002 后 effective 指向新实例; 旧实例迟到 settle 不复活节点', () => {
+    const snap = materialize([
+      { ts: 1, type: 'nodeDispatched', nodeId: 'A', instanceId: 'A#001', attemptId: 'A#001/attempts/001' },
+      { ts: 2, type: 'nodeInstanceSuperseded', nodeId: 'A', instanceId: 'A#001', byNodeId: 'A', reason: 'refresh' },
+      { ts: 3, type: 'nodeDispatched', nodeId: 'A', instanceId: 'A#002', attemptId: 'A#002/attempts/001' },
+      // 旧实例 A#001 的迟到成功（不该把节点拉回 done — 它已被 supersede）
+      { ts: 4, type: 'nodeSucceeded', nodeId: 'A', instanceId: 'A#001', attemptId: 'A#001/attempts/001', manifestPath: '/stale' },
+    ]);
+    expect(snap.nodes.get('A')).toEqual({ status: 'running', effectiveInstanceId: 'A#002' });
+    expect(snap.instances.get('A#002')!.status).toBe('running');
+    // 迟到 settle 记到旧 instance, 但不动节点 effective 视图
+    expect(snap.instances.get('A#001')!.status).toBe('done');
+  });
 });
 
 // ── loadDag（文件 IO）─────────────────────────────────────────────────────────

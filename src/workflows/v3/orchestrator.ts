@@ -27,6 +27,9 @@ export type V3NodeStatus =
   | 'skipped'      // triggerRule unsatisfied; acceptable terminal if a sink still reaches done
   | 'cancelled'    // early-release loser; neutral terminal, not fail-fast
   | 'blocked'      // semantic/contract failure — recoverable via retry (new attempt)
+  | 'superseded'   // an INSTANCE refreshed by a cross-node revisit; the node gets
+                   //   a fresh instance and re-dispatches.  A settled-terminal for
+                   //   that instance, NOT a failure (instance restoration 2026-06-08)
   | 'failed';      // infrastructure failure / gate rejected / timed out — needs intervention
 
 export interface V3NodeState {
@@ -36,6 +39,11 @@ export interface V3NodeState {
    *  gate transitions the node straight to `failed` (set by the runtime), so
    *  this flag only ever records the approved case. */
   gateCleared?: boolean;
+  /** The current live runtime instance of this DEFINITION node (`A#002`).
+   *  Set on dispatch; cleared when a revisit supersedes it (the node then
+   *  re-dispatches a fresh instance).  Absent on the pre-instance-layer path
+   *  (plain nodeId-keyed events) and loop body expansions. */
+  effectiveInstanceId?: string;
 }
 
 /** nodeId → state.  A node absent from the map is treated as `pending`. */
@@ -496,7 +504,11 @@ function terminalStatus(status: V3NodeStatus): boolean {
     status === 'skipped' ||
     status === 'cancelled' ||
     status === 'failed' ||
-    status === 'blocked';
+    status === 'blocked' ||
+    // A superseded INSTANCE is settled (it won't change); the DEFINITION node
+    // re-dispatches under a fresh instance, but that is tracked at the node
+    // level (effectiveInstanceId), not by this per-instance status.
+    status === 'superseded';
 }
 
 function sinkOmissionDetail(sinks: string[], state: V3RunState): string {
