@@ -150,7 +150,7 @@ export function renderGoalFile(
     `If — and ONLY if — you cannot proceed without a human's judgement call (a choice only a person can make; NOT something you can research, infer, or decide yourself), use the runtime human-ask:`,
     `  1. Write a JSON file to $${E.ATTEMPT_DIR}/${GOAL_ASK_FILE} of the shape \`{ "question": "<one clear question>", "options": ["<2-6 concrete choices>"] }\`.`,
     `  2. Write a failure manifest with \`error.code: "${ASK_HUMAN_ERROR_CODE}"\`, \`error.retryable: true\`, and \`summary\` = your question, then STOP.`,
-    `A human picks one option; this node then RE-RUNS with their choice injected into $${E.INPUTS_PATH} as the \`human/answer\` input (read it and continue from there). Prefer deciding yourself — every ask pauses the whole workflow on a person.`,
+    `A human picks one option; this node then RE-RUNS with their choice injected into $${E.INPUTS_PATH} as an input entry \`{ "from": "human", "name": "answer", "path": "..." }\` (read that JSON file and continue from there). Prefer deciding yourself — every ask pauses the whole workflow on a person.`,
     '',
   ].join('\n');
 }
@@ -1069,8 +1069,8 @@ export async function runWorkflow(
     const omittedFrom = new Set((omitted ?? []).map((o) => o.from));
 
     // Runtime human-ask answer: when THIS dispatch is the retry a human-ask was
-    // answered into, inject the persisted answer as a `human/answer` input so the
-    // agent reads the decision and resumes instead of re-asking.
+    // answered into, inject the persisted answer as `{from:'human', name:'answer'}`
+    // so the agent reads the decision and resumes instead of re-asking.
     const answeredRetry = [...events].reverse().find(
       (e): e is StoredEvent & { type: 'nodeRetryRequested' } =>
         e.type === 'nodeRetryRequested' && e.nodeId === node.id &&

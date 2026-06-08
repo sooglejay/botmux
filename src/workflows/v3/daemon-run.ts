@@ -17,7 +17,7 @@
  */
 
 import { join } from 'node:path';
-import { existsSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 
 import { loadBotConfigs, type BotConfig } from '../../bot-registry.js';
 import { isLoopNode, loadDag } from './dag.js';
@@ -291,7 +291,7 @@ export function resolveV3GateClick(
 export type V3RetryOutcome =
   | { kind: 'requested'; nodeId: string; previousAttemptId: string; nextAttemptId: string }
   | { kind: 'already-requested'; nodeId: string }
-  | { kind: 'stale-run'; reason: 'missing' | 'not-blocked' | 'stale-attempt' | 'loop-node' };
+  | { kind: 'stale-run'; reason: 'missing' | 'not-blocked' | 'stale-attempt' | 'loop-node' | 'invalid-answer' };
 
 /**
  * Append a retry intent for a blocked node (the resume entrypoint — daemon
@@ -364,12 +364,18 @@ export function requestV3Retry(
 
   // Runtime human-ask answer: persist the chosen option next to the asked
   // attempt (answer.json) and carry its path on the retry event — buildInputs
-  // injects it into the next attempt as the `human/answer` input.  Plain blocked
-  // retries pass no answer and this whole block is skipped.
+  // injects it into the next attempt as `{from:'human', name:'answer'}`.  Plain
+  // blocked retries pass no answer and this whole block is skipped.  Core
+  // validates membership against the current ask, because a card nonce proves
+  // freshness/integrity but not that `selected` is one of the authored options.
   let answer: { path: string; preview: string; by: string } | undefined;
   if (input.answer) {
+    if (!info.ask || !info.ask.options.includes(input.answer.selected)) {
+      return { kind: 'stale-run', reason: 'invalid-answer' };
+    }
     const answerPath = join(runDir, previousAttemptId, GOAL_ANSWER_FILE);
     const payload: GoalAnswer = { selected: input.answer.selected, by: input.answer.by };
+    mkdirSync(join(runDir, previousAttemptId), { recursive: true });
     writeFileSync(answerPath, JSON.stringify(payload, null, 2));
     answer = { path: answerPath, preview: input.answer.selected, by: input.answer.by };
   }

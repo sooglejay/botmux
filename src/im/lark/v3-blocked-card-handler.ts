@@ -98,6 +98,7 @@ export async function handleV3BlockedAction(
         content:
           outcome.reason === 'missing' ? '该 run 不存在或已清理'
           : outcome.reason === 'stale-attempt' ? '该节点已进入新一轮 attempt，这张旧卡失效（看最新那张卡）'
+          : outcome.reason === 'invalid-answer' ? '这个选项不属于当前问题，卡片已失效'
           : `该节点已不在受阻状态，${verb}卡失效`,
       },
     };

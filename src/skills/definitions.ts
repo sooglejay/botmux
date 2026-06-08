@@ -1040,7 +1040,13 @@ manifest 的要求：
 $${GOAL_ENV.INPUTS_PATH}
 \`\`\`
 
-输入里会有一个 \`from: "human/answer"\` 的条目，指向 answer.json。读取它，里面的 \`selected\` 就是人类选项，然后继续完成原目标。
+输入的 \`inputs[]\` 里会有一个条目：
+
+\`\`\`json
+{ "from": "human", "name": "answer", "path": "/absolute/path/to/answer.json", "kind": "json" }
+\`\`\`
+
+读取它的 \`path\`，里面的 \`selected\` 就是人类选项，然后继续完成原目标。
 `;
 
 const WORKER_BUDGET_SKILL = `---

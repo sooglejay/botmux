@@ -353,6 +353,43 @@ describe('requestV3Retry + 重驱动全链路', () => {
     rmSync(base, { recursive: true, force: true });
   });
 
+  it('human-ask answer 必须属于当前 ask.options，且普通 blocked 不能注入 answer', () => {
+    const base = freshBase();
+    const { journalPath } = seedBlockedRun(base, 'retry-006');
+
+    // 普通 blocked 节点没有 ask payload，不能通过伪造 ask action 注入 answer。
+    const forged = requestV3Retry(base, 'retry-006', {
+      nodeId: 'work',
+      expectedAttemptId: 'work/attempts/001',
+      answer: { selected: 'prod', by: 'ou_op' },
+    });
+    expect(forged).toMatchObject({ kind: 'stale-run', reason: 'invalid-answer' });
+    expect(readJournal(journalPath).filter((e) => e.type === 'nodeRetryRequested')).toHaveLength(0);
+
+    appendEvent(journalPath, {
+      type: 'nodeBlocked', nodeId: 'work', attemptId: 'work/attempts/001',
+      errorClass: 'manifestInvalid', errorCode: 'ASK_HUMAN', message: '部署到哪里？',
+      ask: { question: '部署到哪里？', options: ['staging', 'prod'] },
+    });
+    appendEvent(journalPath, { type: 'runBlocked', blockedNodeId: 'work' });
+
+    const invalid = requestV3Retry(base, 'retry-006', {
+      nodeId: 'work',
+      expectedAttemptId: 'work/attempts/001',
+      answer: { selected: 'dev', by: 'ou_op' },
+    });
+    expect(invalid).toMatchObject({ kind: 'stale-run', reason: 'invalid-answer' });
+    expect(readJournal(journalPath).filter((e) => e.type === 'nodeRetryRequested')).toHaveLength(0);
+
+    const valid = requestV3Retry(base, 'retry-006', {
+      nodeId: 'work',
+      expectedAttemptId: 'work/attempts/001',
+      answer: { selected: 'prod', by: 'ou_op' },
+    });
+    expect(valid).toMatchObject({ kind: 'requested', nextAttemptId: 'work/attempts/002' });
+    rmSync(base, { recursive: true, force: true });
+  });
+
   it('reconcile：blocked run 返回 repostBlocked；retry 后崩溃（running 无 in-flight）返回 resume', () => {
     const base = freshBase();
     seedBlockedRun(base, 'retry-003');
@@ -505,6 +542,9 @@ describe('renderGoalFile golden', () => {
     expect(txt).not.toContain('Structured result');
     expect(txt).toContain('AUTH_REQUIRED');
     expect(txt).toContain('retryable');
+    expect(txt).toContain('"from": "human"');
+    expect(txt).toContain('"name": "answer"');
+    expect(txt).not.toContain('human/answer');
   });
 
   it('有 resultSchema：含 schema JSON + result.json 列入 manifest 的要求', () => {
