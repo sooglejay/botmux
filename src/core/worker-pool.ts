@@ -206,7 +206,14 @@ function daemonCardFooterRecipientOpenId(ds: DaemonSession, effectiveCliId?: str
     return undefined;
   }
   try {
-    return loadKnownBotOpenIdsForApp(ds.larkAppId).has(owner) ? undefined : owner;
+    if (loadKnownBotOpenIdsForApp(ds.larkAppId).has(owner)) {
+      // `/repo`-primed dispatch records the dispatching bot as owner (unlike
+      // the @-mention auto-create path, which nulls ownerOpenId for bot
+      // senders). Same Mira constraint applies: the daemon fallback is Mira's
+      // only reply channel, so address the dispatcher bot here too.
+      return effectiveCliId === 'mira' ? owner : undefined;
+    }
+    return owner;
   } catch {
     return owner;
   }
