@@ -59,8 +59,9 @@ export function chunkAscii(line: string, maxBytes: number): string[] {
  *
  * Returns `{ submitted: false }` when any chunk (or the final Enter) fails to
  * write — the tmux backend's send methods return `false` on a dropped-but-pane-
- * alive keystroke, so a genuine drop is now surfaced to the worker (which warns
- * / re-queues) instead of being swallowed as a false success.
+ * alive keystroke, so a genuine drop is now surfaced to the worker (which raises
+ * a submit-failure notice + recheck so the user can retry) instead of being
+ * swallowed as a false success.
  *
  * Buffer-hygiene contract (the runner only clears its stdin buffer on a newline,
  * see handleInput in codex-app-runner.ts / mira-runner.ts — a half-written
@@ -70,7 +71,7 @@ export function chunkAscii(line: string, maxBytes: number): string[] {
  *     prior failed write may have left behind (runner discards the fragment as
  *     bad input; an empty buffer just ignores the blank line).
  *   - On a dropped chunk: emit a flush Enter so the partial we just wrote can't
- *     merge with the next message, then report non-submission for re-queue.
+ *     merge with the next message, then report non-submission (submit-failure).
  *   - Submit Enter is retried — a single dropped Enter would otherwise leave a
  *     COMPLETE but unsubmitted line in the buffer.
  */
@@ -107,8 +108,9 @@ export async function writeRunnerInput(
   // our new line NOW would merge "old partial + new line" into one bad line the
   // runner drops, while our submit Enter would still report success (a silent
   // message loss — exactly the failure mode this whole change closes). So bail
-  // with submitted:false and let the worker re-queue; we never touch the buffer
-  // with a half write. (Idempotent on the happy path: the previous message's
+  // with submitted:false (the worker raises a submit-failure notice + recheck so
+  // the user can retry); we never touch the buffer with a half write. (Idempotent
+  // on the happy path: the previous message's
   // submit Enter already emptied the buffer, so this enqueues an ignored blank.)
   if (!sendEnterWithRetry()) return { submitted: false };
 
