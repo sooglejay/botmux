@@ -115,6 +115,19 @@ describe('createRepoWorktree', () => {
     expect(git(res.path, 'rev-parse', '--abbrev-ref', 'HEAD')).toBe('feat/existing');
   });
 
+  it('names the worktree after the MAIN repo when given a linked worktree path', async () => {
+    const upstream = makeUpstream('upstream');
+    const repo = makeClone(upstream, 'proj');
+    const first = await createRepoWorktree(repo); // proj-wt-1
+
+    // create FROM the linked worktree — placement/naming must follow `proj`,
+    // not `proj-wt-1` (no proj-wt-1-wt-N)
+    const second = await createRepoWorktree(first.path);
+
+    expect(second.path).toBe(join(tempRoot, 'proj-wt-2'));
+    expect(second.branch).toBe('wt/2');
+  });
+
   it('falls back to HEAD for a repo without a remote', async () => {
     const repo = makeUpstream('standalone');
 

@@ -1124,12 +1124,29 @@ export async function handleCommand(
             }
             repoPath = resolved.path;
           }
+          if (ds.worktreeCreating) {
+            await sessionReply(rootId, t('cmd.repo.worktree_in_progress', undefined, loc));
+            break;
+          }
+          ds.worktreeCreating = true;
+          // Session generation snapshot — another selection can land while the
+          // (awaited) git fetch runs; committing afterwards would kill the
+          // session it just spawned. Mirror of the card-side guard.
+          const startSessionId = ds.session.sessionId;
+          const wasPending = !!ds.pendingRepo;
           await sessionReply(rootId, t('cmd.repo.worktree_creating', { repo: repoPath }, loc));
           let creation;
           try {
             creation = await createRepoWorktree(repoPath, { branch: branchArg });
           } catch (e) {
             await sessionReply(rootId, t('cmd.repo.worktree_failed', { error: e instanceof Error ? e.message : String(e) }, loc));
+            break;
+          } finally {
+            ds.worktreeCreating = false;
+          }
+          if (ds.session.sessionId !== startSessionId || !!ds.pendingRepo !== wasPending) {
+            logger.info(`[${logTag}] Worktree ${creation.path} created but session changed mid-flight — not switching`);
+            await sessionReply(rootId, t('cmd.repo.worktree_created_not_switched', { path: creation.path, branch: creation.branch }, loc));
             break;
           }
           await sessionReply(rootId, t('cmd.repo.worktree_created', {

@@ -1572,9 +1572,26 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
     // ack the card action immediately with a toast and finish asynchronously.
     // On failure the card (and pendingRepo state) stays put so the user can
     // pick again or fall back to a plain switch.
+    if (targetDs.worktreeCreating) {
+      // The async path escapes the card-action in-flight dedup — gate repeats
+      // here, or two creations would race and the loser's commitSelection
+      // would yank the session the winner just spawned.
+      return { toast: { type: 'info', content: t('cmd.repo.worktree_in_progress', undefined, locTarget) } };
+    }
+    targetDs.worktreeCreating = true;
+    // Session generation snapshot: if another selection lands while git runs
+    // (pendingRepo consumed, or the session swapped), committing this worktree
+    // afterwards would kill that fresh session — notify instead of switching.
+    const startSessionId = targetDs.session.sessionId;
+    const wasPending = !!targetDs.pendingRepo;
     void (async () => {
       try {
         const creation = await createRepoWorktree(selectedPath);
+        if (targetDs.session.sessionId !== startSessionId || !!targetDs.pendingRepo !== wasPending) {
+          logger.info(`[${tag(targetDs)}] Worktree ${creation.path} created but session changed mid-flight — not switching`);
+          await sessionReply(rootId, t('cmd.repo.worktree_created_not_switched', { path: creation.path, branch: creation.branch }, locTarget));
+          return;
+        }
         await sessionReply(rootId, t('cmd.repo.worktree_created', {
           path: creation.path, branch: creation.branch, base: creation.baseRef,
         }, locTarget));
@@ -1582,6 +1599,8 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
       } catch (e) {
         logger.warn(`[${tag(targetDs)}] Worktree creation failed for ${selectedPath}: ${e instanceof Error ? e.message : e}`);
         await sessionReply(rootId, t('cmd.repo.worktree_failed', { error: e instanceof Error ? e.message : String(e) }, locTarget));
+      } finally {
+        targetDs.worktreeCreating = false;
       }
     })();
     return { toast: { type: 'info', content: t('card.repo.toast_worktree_creating', undefined, locTarget) } };

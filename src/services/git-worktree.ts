@@ -64,8 +64,18 @@ function dirSuffixForBranch(branch: string): string {
   return branch.replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '');
 }
 
+/** A linked worktree resolves to its repo's MAIN checkout (entry 0 of
+ *  `git worktree list`), so sibling placement and `<repo>-…` naming follow
+ *  the main repo no matter which checkout the caller picked. */
+async function resolveMainWorktree(dir: string): Promise<string> {
+  const out = await tryGit(['worktree', 'list', '--porcelain'], dir);
+  const first = out?.split('\n').find(l => l.startsWith('worktree '));
+  return first ? first.slice('worktree '.length) : dir;
+}
+
 /**
- * Create a linked worktree for `repoPath`, as a sibling directory.
+ * Create a linked worktree for `repoPath`, as a sibling of the repo's MAIN
+ * checkout (a linked-worktree input is resolved back to the main one first).
  *
  * - No `branch` given → auto-pick `wt/N` (first free N), dir `<repo>-wt-N`.
  * - `branch` given and exists locally → check it out into the worktree.
@@ -78,8 +88,9 @@ export async function createRepoWorktree(
   repoPath: string,
   opts: { branch?: string } = {},
 ): Promise<WorktreeCreation> {
-  const repo = resolve(repoPath);
-  await git(['rev-parse', '--git-dir'], repo); // not a repo → throw early
+  const startDir = resolve(repoPath);
+  await git(['rev-parse', '--git-dir'], startDir); // not a repo → throw early
+  const repo = await resolveMainWorktree(startDir);
 
   const baseRef = await resolveBaseRef(repo);
   if (baseRef.startsWith('origin/')) {

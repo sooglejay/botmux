@@ -231,6 +231,8 @@ export const messages: Record<string, string> = {
   'cmd.repo.worktree_creating': '🌿 正在为 `{repo}` 创建 worktree（含 git fetch，可能需要几秒）…',
   'cmd.repo.worktree_created': '🌿 worktree 已创建：`{path}`\n分支 `{branch}`，基于 `{base}`',
   'cmd.repo.worktree_failed': '❌ 创建 worktree 失败：{error}',
+  'cmd.repo.worktree_in_progress': '⏳ 已有一个 worktree 正在创建，请稍候…',
+  'cmd.repo.worktree_created_not_switched': '🌿 worktree 已创建：`{path}`（分支 `{branch}`），但会话状态已变化，未自动切换。需要时可用 `/repo {path}` 打开。',
   'cmd.skip.opened': '▶️ 已直接开启会话（工作目录：{cwd}）',
   'cmd.status.running': '运行中',
   'cmd.status.waiting': '等待中',
