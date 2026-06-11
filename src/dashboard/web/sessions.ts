@@ -516,7 +516,21 @@ export function renderSessionsPage(root: HTMLElement) {
     lastKanbanGroups = groups;
     if (html === lastKanbanHtml) return;
     lastKanbanHtml = html;
+    // innerHTML 重建会把每列列表的滚动位置归零（改名失焦/SSE 更新时列表跳回
+    // 顶部）——重建前按列记录 scrollTop，重建后恢复。
+    const scrollTops = new Map<string, number>();
+    kanban.querySelectorAll<HTMLElement>('.kanban-col-list').forEach(el => {
+      const col = el.closest<HTMLElement>('.kanban-column')?.dataset.col;
+      if (col && el.scrollTop) scrollTops.set(col, el.scrollTop);
+    });
     kanban.innerHTML = html;
+    if (scrollTops.size) {
+      kanban.querySelectorAll<HTMLElement>('.kanban-col-list').forEach(el => {
+        const col = el.closest<HTMLElement>('.kanban-column')?.dataset.col;
+        const top = col ? scrollTops.get(col) : undefined;
+        if (top) el.scrollTop = top;
+      });
+    }
   }
 
   // ── 看板写操作：拖拽放置 / 重命名（乐观更新 + 失败回滚）────────────────────

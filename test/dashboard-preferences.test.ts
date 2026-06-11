@@ -5,9 +5,11 @@ import {
   DEFAULT_BOARD_ORDER,
   normalizeBoardOrder,
   normalizeSessionsViewMode,
+  normalizeSidebarMode,
   normalizeSkin,
   normalizeThemeMode,
   readStoredSessionsViewMode,
+  readStoredSidebarMode,
   readStoredSkin,
   resolveThemeMode,
 } from '../src/dashboard/web/preferences.js';
@@ -77,6 +79,24 @@ describe('sessions view mode preference', () => {
     expect(readStoredSessionsViewMode(make(null))).toBe('board');
     expect(readStoredSessionsViewMode(make('nope'))).toBe('board');
     expect(readStoredSessionsViewMode(make('kanban'))).toBe('kanban');
+  });
+});
+
+describe('sidebar mode preference', () => {
+  it('accepts expanded/collapsed and rejects junk', () => {
+    expect(normalizeSidebarMode('expanded')).toBe('expanded');
+    expect(normalizeSidebarMode('collapsed')).toBe('collapsed');
+    expect(normalizeSidebarMode('hidden')).toBeNull();
+    expect(normalizeSidebarMode(undefined)).toBeNull();
+  });
+
+  it('falls back to expanded for missing/invalid storage', () => {
+    const make = (value: string | null): Storage =>
+      ({ getItem: () => value }) as unknown as Storage;
+    expect(readStoredSidebarMode(undefined)).toBe('expanded');
+    expect(readStoredSidebarMode(make(null))).toBe('expanded');
+    expect(readStoredSidebarMode(make('nope'))).toBe('expanded');
+    expect(readStoredSidebarMode(make('collapsed'))).toBe('collapsed');
   });
 });
 

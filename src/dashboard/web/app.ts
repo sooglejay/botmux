@@ -15,6 +15,7 @@ import { wireBotOnboardingButton } from './bot-onboarding.js';
 import { attentionReason, attentionWaitSince, botDisplayName, escapeHtml, loadNameMaps, relTime, t, ui } from './ui.js';
 import { initThemeMenu, paintThemeMenu } from './theme-menu.js';
 import { normalizeDashboardLocale, type DashboardLocale } from './i18n.js';
+import { readStoredSidebarMode, writeStoredSidebarMode, type SidebarMode } from './preferences.js';
 
 const root = document.getElementById('root')!;
 
@@ -284,6 +285,25 @@ function wireChromeControls() {
     };
   });
   initThemeMenu();
+  wireSidebarToggle();
+}
+
+// 左侧菜单栏收起/展开：状态挂在 <html data-sidebar>，CSS 收窄成图标栏；
+// 偏好进 localStorage，刷新/换页保持。
+function wireSidebarToggle() {
+  const btn = document.getElementById('sidebar-toggle');
+  if (!btn) return;
+  let mode: SidebarMode = readStoredSidebarMode(window.localStorage);
+  const apply = () => {
+    document.documentElement.dataset.sidebar = mode;
+    btn.title = t(mode === 'collapsed' ? 'nav.sidebarExpand' : 'nav.sidebarCollapse');
+  };
+  apply();
+  btn.addEventListener('click', () => {
+    mode = mode === 'collapsed' ? 'expanded' : 'collapsed';
+    writeStoredSidebarMode(window.localStorage, mode);
+    apply();
+  });
 }
 
 // esbuild's IIFE bundle does not support top-level await — use an async IIFE.

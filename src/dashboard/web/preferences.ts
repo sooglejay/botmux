@@ -67,6 +67,27 @@ export function writeStoredSessionsViewMode(storage: Storage | undefined, mode: 
   }
 }
 
+// ── 左侧菜单栏收起/展开 ───────────────────────────────────────────────────────
+export type SidebarMode = 'expanded' | 'collapsed';
+
+export const SIDEBAR_STORAGE_KEY = 'botmux.dashboard.sidebar';
+
+export function normalizeSidebarMode(value: unknown): SidebarMode | null {
+  return value === 'expanded' || value === 'collapsed' ? value : null;
+}
+
+export function readStoredSidebarMode(storage: Storage | undefined): SidebarMode {
+  return normalizeSidebarMode(storage?.getItem(SIDEBAR_STORAGE_KEY)) ?? 'expanded';
+}
+
+export function writeStoredSidebarMode(storage: Storage | undefined, mode: SidebarMode): void {
+  try {
+    storage?.setItem(SIDEBAR_STORAGE_KEY, mode);
+  } catch {
+    // localStorage 不可用时只在当前页生效
+  }
+}
+
 // ── Skin (visual identity, orthogonal to light/dark) ──────────────────────────
 // `default` = the regular botmux look (honours the light/dark theme mode).
 // Every other id is a self-contained palette distilled from the kaboo webui; each

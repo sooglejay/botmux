@@ -158,6 +158,77 @@ a { color: inherit; }
 .sidebar-foot {
   margin-top: auto;
   padding: 10px 8px 4px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.sidebar-toggle {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  min-height: 28px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.sidebar-toggle:hover {
+  background: var(--surface-muted);
+  color: var(--fg);
+}
+
+.sidebar-toggle svg {
+  width: 14px;
+  height: 14px;
+  display: block;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  transition: transform 160ms ease;
+}
+
+/* 收起态：侧栏收窄成图标栏（只在桌面布局生效；窄屏侧栏本来就折成顶栏） */
+@media (min-width: 981px) {
+  :root[data-sidebar="collapsed"] {
+    --sidebar-width: 68px;
+  }
+  :root[data-sidebar="collapsed"] .sidebar {
+    padding: 18px 10px;
+  }
+  :root[data-sidebar="collapsed"] .brand {
+    justify-content: center;
+    padding: 8px 0;
+  }
+  :root[data-sidebar="collapsed"] .brand > span:not(.brand-mark) {
+    display: none;
+  }
+  :root[data-sidebar="collapsed"] .sidebar-nav a {
+    justify-content: center;
+    padding: 8px;
+  }
+  :root[data-sidebar="collapsed"] .sidebar-nav a span {
+    display: none;
+  }
+  :root[data-sidebar="collapsed"] .connection-status {
+    display: none;
+  }
+  :root[data-sidebar="collapsed"] .sidebar-foot {
+    justify-content: center;
+    padding: 10px 0 4px;
+  }
+  :root[data-sidebar="collapsed"] .sidebar-toggle svg {
+    transform: rotate(180deg);
+  }
 }
 
 .connection-status {
@@ -1155,7 +1226,10 @@ button.primary {
 }
 
 .kanban-column {
-  flex: 0 0 280px;
+  /* 弹性等分而非固定 280px：5 列在任何视口宽度下收缩到容器内，
+     不再把页面撑出横向滚动条（极窄屏由媒体查询改纵向堆叠兜底）。 */
+  flex: 1 1 0;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   min-height: 320px;
@@ -1274,6 +1348,12 @@ button.primary {
   font-family: var(--mono);
   font-size: 11px;
   white-space: nowrap;
+  /* top 行空间不够时（CLI 徽章 + adopt 徽章 + 状态点 + 两个按钮）牺牲短 ID，
+     让它收缩截断，别把右侧按钮挤出卡片。 */
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* CLI 徽章别折行（claude-code 之类带连字符的会被 280px 卡片拆成两行） */
@@ -1316,16 +1396,19 @@ button.primary {
   background: var(--border);
 }
 
-.kanban-card-act {
+/* 选择器带上 .kanban-card 提特异性：通用 .card-act 基础规则（display/尺寸）
+   定义在本节之后，同特异性会反杀这里的覆盖。 */
+.kanban-card .kanban-card-act {
   width: 24px;
   height: 24px;
   min-height: 24px;
-  opacity: 0;
+  /* 不悬停时彻底不占位（opacity:0 仍会把短 ID 永久挤成省略号） */
+  display: none;
 }
 
 .kanban-card:hover .kanban-card-act,
 .kanban-card:focus-within .kanban-card-act {
-  opacity: 1;
+  display: inline-flex;
 }
 
 /* 标题就地编辑输入框：占标题原位，不撑破卡片 */
