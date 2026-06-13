@@ -1650,10 +1650,9 @@ button.primary {
   flex: none;
 }
 
-/* 标题就地编辑输入框 */
+/* 标题就地编辑输入框：宽度由 JS 按内容实测设定（fitInput），这里只给兜底上限 */
 .term-modal-name-input {
-  min-width: 180px;
-  max-width: 380px;
+  max-width: 60vw;
   margin: 0;
   padding: 3px 8px;
   border: 1px solid var(--accent);

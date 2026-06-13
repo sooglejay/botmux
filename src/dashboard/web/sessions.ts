@@ -140,9 +140,9 @@ const ICON = {
   close: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4.2 4.2 11.8 11.8"/><path d="M11.8 4.2 4.2 11.8"/></svg>',
   edit: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M10.7 3.3 12.7 5.3 6.3 11.7 3.7 12.3 4.3 9.7 10.7 3.3z"/></svg>',
   history: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.2 4.8a2 2 0 0 1 2-2h7.6a2 2 0 0 1 2 2v4.6a2 2 0 0 1-2 2H6.6l-2.9 2.4v-2.4h-.5a2 2 0 0 1-2-2z"/><path d="M5.2 6.2h5.6M5.2 8.4h3.6"/></svg>',
-  // 飞书：圆角对话气泡 + 内部一只上扬的飞鸟（呼应 Lark 纸鹤 logo），
-  // stroke:currentColor 与本组图标统一。
-  feishu: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.6 3.1h8.8a1.3 1.3 0 0 1 1.3 1.3v4.6a1.3 1.3 0 0 1-1.3 1.3H6.7L4 13v-2.4a1.3 1.3 0 0 1-1.3-1.3V4.4a1.3 1.3 0 0 1 1.3-1.3z"/><path d="M5.1 8c1.3-1.5 3.5-1.5 4.8 0 .7.8 1.7 1 2.4.4"/></svg>',
+  // 飞书：两片交叠的羽毛向右上展翅（还原 Lark 彩色 logo 的飞鸟造型），单色
+  // stroke:currentColor 适配本组线性图标，圆角端点呼应原 logo 的圆润羽尖。
+  feishu: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.6 4.4C6.4 4 10.4 5.4 13.4 8.2 9.8 7 6.4 6.6 3.4 7.4"/><path d="M13.4 8.2C9.6 8.7 6 10 2.9 12 5.6 9 8.8 7.6 13.4 8.2"/></svg>',
 };
 
 /** Compact icon action button for the card bar. `kind` adds a tint variant. */
@@ -1074,6 +1074,25 @@ export function renderSessionsPage(root: HTMLElement) {
     input.maxLength = 200;
     input.value = stripMentionPrefix(s.title) || '';
     nameEl.replaceWith(input);
+    // 宽度贴合内容：按文本实测像素宽设宽，clamp 到 [80, 60vw]，超长则到上限
+    // 后内部横向滚动（与原标题省略号的「有上限」体感一致）。
+    const fitInput = () => {
+      const cs = getComputedStyle(input);
+      const span = document.createElement('span');
+      span.style.cssText = 'position:absolute;visibility:hidden;white-space:pre';
+      span.style.fontSize = cs.fontSize;
+      span.style.fontFamily = cs.fontFamily;
+      span.style.fontWeight = cs.fontWeight;
+      span.style.letterSpacing = cs.letterSpacing;
+      span.textContent = input.value || ' ';
+      document.body.appendChild(span);
+      const w = span.offsetWidth;
+      span.remove();
+      const max = Math.round(window.innerWidth * 0.6);
+      input.style.width = `${Math.min(Math.max(w + 22, 80), max)}px`;
+    };
+    fitInput();
+    input.addEventListener('input', fitInput);
     input.focus();
     input.select();
     let settled = false;
