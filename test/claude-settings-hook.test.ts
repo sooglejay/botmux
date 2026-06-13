@@ -72,10 +72,12 @@ describe('claude-code —— hook 注入策略（adopt 兼容 + SessionStart 真
 
   it('adapter 声明 hookInstall 指向全局 ~/.claude/settings.json', () => {
     // 家族工厂从 dataDir 统一拼绝对路径（= ~/.claude/settings.json 经 expandHome 的等价形式）。
-    expect(adapter.hookInstall).toEqual({
+    expect(adapter.hookInstall).toMatchObject({
       configPath: join(homedir(), '.claude', 'settings.json'),
       format: 'claude-settings',
     });
+    // 同时把 SessionStart 就绪 hook 写全局（为 aiden x claude 这类剥 --settings 的启动器供信号）
+    expect(adapter.hookInstall?.sessionStartCommand).toMatch(/session-ready$/);
     // 仍标记 asksViaHook（驱动「不装 botmux-ask skill 兜底」）
     expect(adapter.asksViaHook).toBe(true);
   });

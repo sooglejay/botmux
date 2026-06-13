@@ -46,24 +46,22 @@
  *                                 already-idle Claude would otherwise have its
  *                                 first post-recovery message held until the
  *                                 fallback timeout — a user-visible regression.
- *   - NOT `launcherStripsSettings` — a wrapperCli launcher that drops our
- *                                 `--settings` (e.g. `aiden x claude`, which
- *                                 rejects it) means the SessionStart hook never
- *                                 reaches Claude → the signal can't fire → arming
- *                                 would hold the first prompt for the full 45s
- *                                 timeout. aiden launches REAL Claude Code (no
- *                                 cjadk selector), so readyPattern is safe here.
  *
  * Any of the negatives → don't arm; the gate stays open and the spawn behaves
  * exactly as before (readyPattern + quiescence).
+ *
+ * NB: `wrapperCli=aiden x claude` strips our process-level `--settings`, but the
+ * SessionStart hook is ALSO installed globally (~/.claude/settings.json — see
+ * claude-code.ts hookInstall.sessionStartCommand), which aiden's Claude still
+ * reads. So the real signal fires there too → we KEEP arming for that case
+ * (no readyPattern fallback, which could misjudge).
  */
 export function shouldArmReadyGate(state: {
   injectsReadyHook: boolean;
   adoptMode: boolean;
   willReattachPersistent: boolean;
-  launcherStripsSettings?: boolean;
 }): boolean {
-  return state.injectsReadyHook && !state.adoptMode && !state.willReattachPersistent && !state.launcherStripsSettings;
+  return state.injectsReadyHook && !state.adoptMode && !state.willReattachPersistent;
 }
 
 export class ReadyGate {

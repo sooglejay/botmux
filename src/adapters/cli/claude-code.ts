@@ -860,6 +860,10 @@ export function createClaudeFamilyAdapter(variant: ClaudeFamilyVariant, rawBin: 
     hookInstall: {
       configPath: join(variant.dataDir, 'settings.json'),
       format: 'claude-settings',
+      // SessionStart 就绪 hook 也写全局：进程级 --settings 那份会被 wrapperCli=`aiden x
+      // claude` 剥掉（aiden 硬拒 --settings），全局这条是它唯一能拿到就绪信号的渠道，
+      // 避免首条 prompt 空等 45s。原生 claude 会同时收到进程级+全局两份，幂等无害。
+      sessionStartCommand: sessionReadyHookCommand(),
     },
     asksViaHook: true,
   };

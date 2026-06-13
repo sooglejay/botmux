@@ -41,15 +41,11 @@ describe('shouldArmReadyGate', () => {
     expect(shouldArmReadyGate({ injectsReadyHook: true, adoptMode: false, willReattachPersistent: true })).toBe(false);
   });
 
-  it('does NOT arm when the launcher strips --settings (aiden x claude → no SessionStart hook)', () => {
-    // wrapperCli "aiden x claude" drops --settings before launching real Claude;
-    // the SessionStart signal can never fire, so arming would stall the first
-    // prompt for the full 45s timeout. Fall back to readyPattern instead.
-    expect(shouldArmReadyGate({ ...base, launcherStripsSettings: true })).toBe(false);
-  });
-
-  it('still arms when a launcher is present but keeps --settings (e.g. ccr)', () => {
-    expect(shouldArmReadyGate({ ...base, launcherStripsSettings: false })).toBe(true);
+  it('KEEPS arming for aiden x claude: --settings is stripped but the SessionStart hook is installed globally', () => {
+    // wrapperCli "aiden x claude" drops process-level --settings, yet the ready
+    // hook is ALSO in ~/.claude/settings.json (hookInstall.sessionStartCommand),
+    // which aiden's real Claude still reads → the signal fires → keep the gate.
+    expect(shouldArmReadyGate(base)).toBe(true);
   });
 });
 
