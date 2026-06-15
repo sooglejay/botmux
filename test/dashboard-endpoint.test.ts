@@ -22,6 +22,7 @@ import {
   callDashboard,
   type DashboardEndpoint,
 } from '../src/cli/dashboard-endpoint.js';
+import { verifyHmac, cliAuthBind, signCliAuth } from '../src/dashboard/auth.js';
 
 const SECRET = Buffer.from('test-secret').toString('base64url');
 
@@ -165,9 +166,10 @@ describe('callDashboard', () => {
   });
 });
 
-// Sanity: HMAC headers are well-formed (the real dashboard would verify them).
+// Sanity: HMAC headers are well-formed and bound to method + path + port (the
+// real dashboard reconstructs the same bind to verify them).
 describe('requestDashboardAt HMAC headers', () => {
-  it('signs ts:nonce with the secret', async () => {
+  it('signs ts:nonce bound to method+path+port with the secret', async () => {
     setPort(7891);
     let headers: Record<string, string> = {};
     const spy = (async (_i: string, init?: RequestInit) => {
@@ -177,8 +179,57 @@ describe('requestDashboardAt HMAC headers', () => {
     await callDashboard({ configDir: dir, defaultPort: 7891, path: '/__cli/rotate', fetchImpl: spy });
     const ts = headers['X-Botmux-Cli-Ts'];
     const nonce = headers['X-Botmux-Cli-Nonce'];
-    const expected = createHmac('sha256', SECRET).update(`${ts}:${nonce}`).digest('base64url');
+    const bind = cliAuthBind('POST', '/__cli/rotate', 7891);
+    const expected = createHmac('sha256', SECRET).update(`${ts}:${nonce}:${bind}`).digest('base64url');
     expect(headers['X-Botmux-Cli-Auth']).toBe(expected);
+  });
+});
+
+/**
+ * Security regression (Codex review of #216): the discovery scan signs an HMAC
+ * with token-grade headers and hands them to UNCONFIRMED candidate ports. A
+ * malicious local server in the probe range must not be able to forward those
+ * captured headers to the real dashboard to read or mint a token. Binding the
+ * signature to method + path + the dialed port makes the credential
+ * single-purpose, so every forward mismatches the verifier's own bind.
+ */
+describe('discovery credential binding (anti-forward)', () => {
+  const LOOPBACK = '127.0.0.1';
+  const MALICIOUS_PORT = 7905;   // what the CLI dialed (and the attacker captured on)
+  const REAL_PORT = 7901;        // where the real dashboard actually bound
+
+  it('a /__cli/current probe captured on the malicious port cannot be forwarded anywhere useful', () => {
+    // CLI signs a read-only discovery probe addressed to the malicious port.
+    const captured = signCliAuth(SECRET, cliAuthBind('POST', '/__cli/current', MALICIOUS_PORT));
+
+    // Attacker forwards the SAME headers to the real dashboard (which verifies
+    // against the port IT bound, not the Host header):
+    // → same route, real port: rejected (port differs).
+    expect(verifyHmac(SECRET, captured, LOOPBACK,
+      cliAuthBind('POST', '/__cli/current', REAL_PORT)).ok).toBe(false);
+    // → escalate to the token-minting route: rejected (path + port differ).
+    expect(verifyHmac(SECRET, captured, LOOPBACK,
+      cliAuthBind('POST', '/__cli/rotate', REAL_PORT)).ok).toBe(false);
+  });
+
+  it('a current-route credential cannot be replayed onto the rotate route (same port)', () => {
+    const cur = signCliAuth(SECRET, cliAuthBind('POST', '/__cli/current', REAL_PORT));
+    expect(verifyHmac(SECRET, cur, LOOPBACK,
+      cliAuthBind('POST', '/__cli/rotate', REAL_PORT)).ok).toBe(false);
+  });
+
+  it('a correctly-addressed request still verifies (positive control)', () => {
+    const ok = signCliAuth(SECRET, cliAuthBind('POST', '/__cli/rotate', REAL_PORT));
+    expect(verifyHmac(SECRET, ok, LOOPBACK,
+      cliAuthBind('POST', '/__cli/rotate', REAL_PORT)).ok).toBe(true);
+  });
+
+  it('legacy unbound IPC-style signature is rejected by a bound (/__cli) verifier', () => {
+    // Daemon-IPC headers are signed over bare ts:nonce; they must not satisfy a
+    // bound /__cli verifier (prevents cross-scheme replay between the two servers).
+    const unbound = signCliAuth(SECRET); // no bind
+    expect(verifyHmac(SECRET, unbound, LOOPBACK,
+      cliAuthBind('POST', '/__cli/current', REAL_PORT)).ok).toBe(false);
   });
 });
 

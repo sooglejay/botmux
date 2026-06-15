@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { createHmac, randomBytes } from 'node:crypto';
 import { atomicWriteFileSync } from '../utils/atomic-write.js';
+import { cliAuthBind, signCliAuth } from '../dashboard/auth.js';
 
 /**
  * Loopback HMAC client for the dashboard process's `/__cli/*` endpoints, used by
@@ -71,9 +71,12 @@ export async function requestDashboardAt(opts: {
 }): Promise<DashboardResult> {
   const { host, port, path, secret } = opts;
   const fetchImpl = opts.fetchImpl ?? fetch;
-  const ts = Math.floor(Date.now() / 1000).toString();
-  const nonce = randomBytes(8).toString('hex');
-  const sig = createHmac('sha256', secret).update(`${ts}:${nonce}`).digest('base64url');
+  // Bind the credential to method + path + the port we're dialing. A malicious
+  // server handed these headers during discovery therefore can't forward them
+  // to a different `/__cli/*` route or to the real dashboard on another port —
+  // the verifier reconstructs the bind from the port IT bound, so any forward
+  // mismatches the signature (and the attacker can't re-sign without the secret).
+  const { ts, nonce, sig } = signCliAuth(secret, cliAuthBind('POST', path, port));
 
   let res: Response;
   try {
