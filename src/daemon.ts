@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 import { config, getDashboardExternalHost } from './config.js';
-import { readGlobalConfig } from './global-config.js';
+import { repoPickerScanOptions } from './global-config.js';
 import { writeHeartbeat } from './core/daemon-heartbeat.js';
 import { startMaintenance, stopMaintenance } from './core/maintenance.js';
 import { sendRestartReportIfPending } from './core/restart-report.js';
@@ -2139,9 +2139,6 @@ async function startInitialPassthroughSession(args: {
   logger.info(`[${tag(ds)}] No projects to select, queued initial raw passthrough ${commandContent.substring(0, 40)}`);
 }
 
-function repoPickerScanOptions(): { includeWorktrees: boolean } {
-  return { includeWorktrees: readGlobalConfig().repoPickerMode !== 'repos' };
-}
 
 async function handleNewTopic(data: any, ctx: RoutingContext): Promise<void> {
   const { chatId, messageId, chatType, larkAppId, replyRootId } = ctx;

@@ -13,6 +13,7 @@
  * a future client that adds a setting we don't know about doesn't lose it.
  */
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import type { ProjectScanOptions } from './services/project-scanner.js';
 import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
 import { isLocale, type Locale } from './i18n/types.js';
@@ -253,6 +254,14 @@ export function readGlobalConfig(): GlobalConfig {
   if (typeof raw.httpProxy === 'string' && raw.httpProxy.trim()) out.httpProxy = raw.httpProxy.trim();
   readCache = { path, value: out, at: Date.now() };
   return out;
+}
+
+/** Derive repo-picker scan options from the machine-wide `repoPickerMode`.
+ *  'repos' hides linked worktrees from selection cards; anything else
+ *  (default 'all') lists repos + their worktrees. Shared by every scan
+ *  entry point (daemon spawn paths + `/repo`) so they stay consistent. */
+export function repoPickerScanOptions(): ProjectScanOptions {
+  return { includeWorktrees: readGlobalConfig().repoPickerMode !== 'repos' };
 }
 
 /** Merge a patch into the on-disk config, preserving unknown keys. Creates

@@ -7,7 +7,7 @@ import { join, resolve, basename } from 'node:path';
 import { config } from '../config.js';
 import { buildTerminalUrl } from './terminal-url.js';
 import { getBot, getAllBots, getBotOpenId } from '../bot-registry.js';
-import { readGlobalConfig } from '../global-config.js';
+import { repoPickerScanOptions } from '../global-config.js';
 import * as sessionStore from '../services/session-store.js';
 import * as scheduleStore from '../services/schedule-store.js';
 import * as scheduler from './scheduler.js';
@@ -316,9 +316,6 @@ function invalidConfiguredWorkingDirs(ds: DaemonSession | undefined, larkAppId: 
   });
 }
 
-function repoPickerScanOptions(): { includeWorktrees: boolean } {
-  return { includeWorktrees: readGlobalConfig().repoPickerMode !== 'repos' };
-}
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 

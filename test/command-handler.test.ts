@@ -46,6 +46,9 @@ vi.mock('../src/config.js', () => ({
 
 vi.mock('../src/global-config.js', () => ({
   readGlobalConfig: vi.fn(() => ({})),
+  // repoPickerScanOptions is the shared helper command-handler depends on;
+  // default to legacy (include worktrees), overridden per-test.
+  repoPickerScanOptions: vi.fn(() => ({ includeWorktrees: true })),
 }));
 
 // Mock role/profile stores so /role routing tests assert on calls (no real FS).
@@ -362,7 +365,7 @@ import { generateAuthUrl, getTokenStatus } from '../src/utils/user-token.js';
 import { bindOncall } from '../src/services/oncall-store.js';
 import { existsSync, statSync, readFileSync } from 'node:fs';
 import { scanMultipleProjects } from '../src/services/project-scanner.js';
-import { readGlobalConfig } from '../src/global-config.js';
+import { repoPickerScanOptions } from '../src/global-config.js';
 import { createRepoWorktree } from '../src/services/git-worktree.js';
 import { discoverAdoptableSessions } from '../src/core/session-discovery.js';
 import { listCodexAppThreads } from '../src/services/codex-app-threads.js';
@@ -694,6 +697,9 @@ describe('handleCommand', () => {
     vi.clearAllMocks();
     vi.mocked(getBot).mockImplementation(defaultGetBot as any);
     vi.mocked(listCodexAppThreads).mockResolvedValue([]);
+    // clearAllMocks wipes the factory default — restore legacy (include
+    // worktrees) so /repo scan tests aren't passed `undefined` options.
+    vi.mocked(repoPickerScanOptions).mockReturnValue({ includeWorktrees: true });
   });
 
   // ─── /close ─────────────────────────────────────────────────────────────
@@ -1128,7 +1134,7 @@ describe('handleCommand', () => {
 
     it('should omit worktrees from the project list when global repoPickerMode is repos', async () => {
       vi.mocked(existsSync).mockReturnValue(true);
-      vi.mocked(readGlobalConfig).mockReturnValue({ repoPickerMode: 'repos' } as any);
+      vi.mocked(repoPickerScanOptions).mockReturnValue({ includeWorktrees: false });
       vi.mocked(scanMultipleProjects).mockReturnValue([
         { name: 'proj', path: '/home/testuser/proj', branch: 'main' },
       ]);
