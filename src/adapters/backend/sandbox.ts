@@ -181,6 +181,15 @@ export function buildSandboxArgs(plan: SandboxPlan): string[] {
  * path so the binary (and the node interpreter its `#!/usr/bin/env node` shebang
  * needs, which lives in the same fnm bin dir) survive the tmpfs.
  *
+ * The caller feeds in EVERY path that will be exec'd inside the sandbox, not just
+ * the direct bwrap target: the cliBin, the daemon's own node (process.execPath),
+ * AND the raw cliArgs — the last covers SECOND-STAGE binaries a runner spawns
+ * later, e.g. the codex-app adapter's `--codex-bin /run/.../codex` (its
+ * resolvedBin is the daemon node running the runner, so without this the real
+ * codex path would still be masked). Non-path argv tokens (`--session-id`, ids,
+ * `app-server`, …) have a dirname of `.` and are silently ignored, so passing the
+ * whole cliArgs through is safe.
+ *
  * Pure: returns the `--ro-bind-try <dir> <dir>` args (deduped, `/run/`-subpaths
  * only — NEVER `/run` itself, which would clobber the tmpfs and the relay shim
  * mounted at /run/sbxbin). `-try` so a stale/racing path can't fail the spawn.
@@ -379,11 +388,16 @@ export function prepareSandbox(opts: {
   // botmux-send etc. skills, no secrets). Re-exposed read-only at its real path.
   const pluginDir = join(home, '.botmux', 'claude-plugin');
   args.push('--ro-bind-try', pluginDir, pluginDir);
-  // Re-expose any CLI/node bin dir living under /run (fnm/nvm/volta symlink farms)
-  // that the `--tmpfs /run` above just masked — else the resolved cliBin / the
-  // node its shebang needs vanish in-sandbox and the CLI crash-loops on spawn.
-  // process.execPath = the daemon's own node (under /run too when fnm-managed).
-  args.push(...reexposeRunBinArgs([opts.cliBin, process.execPath]));
+  // Re-expose any bin dir living under /run (fnm/nvm/volta symlink farms) that the
+  // `--tmpfs /run` above just masked — else the resolved cliBin / the node its
+  // shebang needs / a second-stage binary the runner spawns vanish in-sandbox and
+  // the CLI crash-loops on spawn. We feed in every in-sandbox executable path:
+  //  - opts.cliBin: the direct bwrap target
+  //  - process.execPath: the daemon's own node (under /run too when fnm-managed)
+  //  - opts.cliArgs: covers second-stage binaries, e.g. codex-app's --codex-bin
+  //    (resolvedBin there is the daemon node, so cliBin alone misses the real
+  //    codex path). Non-path tokens are ignored by reexposeRunBinArgs.
+  args.push(...reexposeRunBinArgs([opts.cliBin, process.execPath, ...opts.cliArgs]));
 
   // Authoritative child env via bwrap --setenv (works on pty AND tmux — the tmux
   // backend only forwards a fixed whitelist, which excludes HOME/PATH/relay).

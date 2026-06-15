@@ -146,6 +146,20 @@ describe('reexposeRunBinArgs (fnm/nvm /run bin dirs)', () => {
   it('skips empty/non-string entries', () => {
     expect(reexposeRunBinArgs([undefined, '', '/run/user/1/bin/x'])).toEqual(['--ro-bind-try', '/run/user/1/bin', '/run/user/1/bin']);
   });
+
+  it('covers a SECOND-STAGE /run binary in cliArgs when cliBin+node are OUTSIDE /run (codex-app --codex-bin)', () => {
+    // codex-app: resolvedBin = daemon node (stable fnm install, NOT /run); the
+    // real codex is passed as `--codex-bin /run/.../codex` and spawned inside the
+    // sandbox by the runner. Without folding cliArgs in, the re-bind list is empty
+    // and --tmpfs /run still masks the second-stage binary → crash-loop.
+    const stableNode = '/root/.local/share/fnm/node-versions/v24.16.0/installation/bin/node';
+    const runCodex = '/run/user/1001/fnm_multishells/abc_123/bin/codex';
+    const cliArgs = ['/path/to/runner.js', '--session-id', 's1', '--codex-bin', runCodex, '--cwd', '/home/u/proj'];
+    const a = reexposeRunBinArgs([stableNode, stableNode, ...cliArgs]);
+    expect(tripleIdx(a, '--ro-bind-try', '/run/user/1001/fnm_multishells/abc_123/bin', '/run/user/1001/fnm_multishells/abc_123/bin')).toBeGreaterThanOrEqual(0);
+    // and nothing else got re-bound (the stable node + non-path tokens are ignored)
+    expect(a).toEqual(['--ro-bind-try', '/run/user/1001/fnm_multishells/abc_123/bin', '/run/user/1001/fnm_multishells/abc_123/bin']);
+  });
 });
 
 // ── validateRelayRequest: pure schema + flag-allowlist boundary (UNCHANGED) ──
