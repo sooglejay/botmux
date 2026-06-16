@@ -1,5 +1,6 @@
 // src/dashboard.ts
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { createServer as createTcpServer } from 'node:net';
 import {
   readFileSync, existsSync, chmodSync, mkdirSync, statSync, createReadStream,
 } from 'node:fs';
@@ -68,6 +69,28 @@ let activeToken: string | null = loadPersistedToken(TOKEN_PATH);
 let boundDashboardPort = config.dashboard.port;
 
 const SECRET = loadOrCreateSecret();
+
+function isWildcardBindHost(host: string): boolean {
+  return host === '0.0.0.0' || host === '::' || host === '';
+}
+
+function tcpPortAvailable(host: string, port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const probe = createTcpServer();
+    probe.once('error', () => resolve(false));
+    probe.listen(port, host, () => {
+      probe.close(() => resolve(true));
+    });
+  });
+}
+
+function dashboardPortAvailable(port: number): Promise<boolean> {
+  if (!isWildcardBindHost(config.dashboard.host)) return Promise.resolve(true);
+  // `botmux dashboard` talks to loopback even when the browser-facing server
+  // binds wildcard. On macOS another process can hold 127.0.0.1:port while a
+  // wildcard bind still succeeds, causing CLI HMAC calls to hit that process.
+  return tcpPortAvailable('127.0.0.1', port);
+}
 
 /** Sign a loopback request to a daemon's write-link route. The daemon verifies
  *  with the same .dashboard-secret, so only a caller that can read the secret —
@@ -1372,6 +1395,7 @@ listenWithProbe({
   server,
   port: config.dashboard.port,
   host: config.dashboard.host,
+  portAvailable: dashboardPortAvailable,
   log: (m) => logger.warn(`[dashboard] ${m}`),
 }).then((port) => {
   boundDashboardPort = port;
