@@ -118,6 +118,16 @@ describe('createRepoWorktree', () => {
     expect(res.path).toBe(join(tempRoot, 'proj-wt-fix-repo-wt-naming-2'));
   });
 
+  it('falls back to wt/N when the slug has no latin/digit tokens (all-CJK)', async () => {
+    const upstream = makeUpstream('upstream');
+    const repo = makeClone(upstream, 'proj');
+
+    const res = await createRepoWorktree(repo, { slug: '修复卡片重复点击' });
+
+    expect(res.branch).toBe('wt/1');
+    expect(res.path).toBe(join(tempRoot, 'proj-wt-1'));
+  });
+
   it('uses an explicit new branch name (sanitized into the dir name)', async () => {
     const upstream = makeUpstream('upstream');
     const repo = makeClone(upstream, 'proj');
@@ -221,8 +231,9 @@ describe('worktree semantic slug helpers', () => {
     expect(localWorktreeSlugFromContext('   ', 'Implement the picker')).toBe('implement-the-picker');
   });
 
-  it('uses a stable hash fallback for non-ascii-only text', () => {
+  it('keeps latin tokens from mixed text and returns undefined for all-CJK', () => {
     expect(slugFromWorktreeText('新建 worktree 和分支')).toBe('worktree');
-    expect(slugFromWorktreeText('看下新开工作树的命名逻辑')).toMatch(/^task-[a-f0-9]{8}$/);
+    expect(slugFromWorktreeText('看下新开工作树的命名逻辑')).toBeUndefined();
+    expect(localWorktreeSlugFromContext('修复卡片重复点击')).toBeUndefined();
   });
 });

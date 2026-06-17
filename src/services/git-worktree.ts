@@ -8,7 +8,6 @@
  * runs inside the daemon's event loop.
  */
 import { execFile } from 'node:child_process';
-import { createHash } from 'node:crypto';
 import { promisify } from 'node:util';
 import { existsSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
@@ -76,17 +75,14 @@ function dirSuffixForBranch(branch: string): string {
   return branch.replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'branch';
 }
 
-function shortHash(text: string): string {
-  return createHash('sha1').update(text).digest('hex').slice(0, 8);
-}
-
 /**
  * Build a git/filesystem-safe semantic slug from a session title or the first
- * prompt. Keep it ASCII so branch and directory names are portable; when the
- * source text has no latin/digit tokens (for example, all-CJK text), fall back
- * to a stable hash instead of returning an empty name.
+ * prompt. Keep it ASCII so branch and directory names are portable. When the
+ * source text has no latin/digit tokens (for example, all-CJK text), return
+ * `undefined` so the caller falls back to the sequential `wt/N` naming rather
+ * than an opaque hash.
  */
-export function slugFromWorktreeText(text: string | undefined | null, fallback = 'task'): string | undefined {
+export function slugFromWorktreeText(text: string | undefined | null): string | undefined {
   const raw = text?.trim();
   if (!raw) return undefined;
   const slug = raw
@@ -98,8 +94,7 @@ export function slugFromWorktreeText(text: string | undefined | null, fallback =
     .replace(/^-+|-+$/g, '')
     .slice(0, 48)
     .replace(/-+$/g, '');
-  if (slug) return slug;
-  return `${fallback}-${shortHash(raw)}`;
+  return slug || undefined;
 }
 
 /** A linked worktree resolves to its repo's MAIN checkout (entry 0 of
@@ -115,9 +110,10 @@ async function resolveMainWorktree(dir: string): Promise<string> {
  * Create a linked worktree for `repoPath`, as a sibling of the repo's MAIN
  * checkout (a linked-worktree input is resolved back to the main one first).
  *
- * - No `branch` given, `slug` given → auto-pick `wt/<slug>` (or `-2` etc.),
- *   dir `<repo>-wt-<slug>`.
- * - No `branch`/`slug` given → auto-pick `wt/N` (first free N), dir `<repo>-wt-N`.
+ * - No `branch` given, `slug` yields a latin slug → auto-pick `wt/<slug>`
+ *   (or `-2` etc.), dir `<repo>-wt-<slug>`.
+ * - No `branch`/`slug` (or a `slug` with no latin/digit tokens, e.g. all-CJK)
+ *   → auto-pick `wt/N` (first free N), dir `<repo>-wt-N`.
  * - `branch` given and exists locally → check it out into the worktree.
  * - `branch` given and exists remotely → create a local tracking branch from it.
  * - `branch` given and new → create it from the remote default branch.
@@ -148,12 +144,14 @@ export async function createRepoWorktree(
 
   let branch = opts.branch?.trim() ?? '';
   let wtPath: string;
+  // Sanitize the auto-name seed up front: a slug with no latin/digit tokens
+  // (e.g. all-CJK) collapses to nothing → fall through to the `wt/N` path
+  // rather than throwing or emitting an opaque hash.
+  const slug = branch ? undefined : slugFromWorktreeText(opts.slug);
   if (branch) {
     wtPath = join(parent, `${repoBase}-${dirSuffixForBranch(branch)}`);
     if (existsSync(wtPath)) throw new Error(`worktree target already exists: ${wtPath}`);
-  } else if (opts.slug) {
-    const slug = slugFromWorktreeText(opts.slug, 'task');
-    if (!slug) throw new Error('invalid worktree slug');
+  } else if (slug) {
     for (let n = 1;; n++) {
       if (n > 1000) throw new Error(`no free wt/${slug} slot under 1000`);
       const candidateSlug = n === 1 ? slug : `${slug}-${n}`;
