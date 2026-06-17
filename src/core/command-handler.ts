@@ -57,7 +57,13 @@ import { t, localeForBot, type Locale } from '../i18n/index.js';
 
 // ─── Exported constants ──────────────────────────────────────────────────────
 
-export const DAEMON_COMMANDS = new Set(['/close', '/restart', '/status', '/help', '/cd', '/repo', '/schedule', '/role', '/botconfig', '/pair', '/login', '/adopt', '/detach', '/disconnect', '/oncall', '/group', '/g', '/relay', '/card', '/term', '/list-slash-command', '/slash', '/land', '/subscribe-lark-doc']);
+// DAEMON_COMMANDS / PASSTHROUGH_COMMANDS / normalizePassthroughCommand now live
+// in the leaf ./passthrough-commands.js so the config store can share the
+// normalization without a circular import; imported for internal use and
+// re-exported to keep callers (daemon.ts, tests) importing from command-handler
+// unchanged.
+import { DAEMON_COMMANDS, PASSTHROUGH_COMMANDS, normalizePassthroughCommand, parseCustomPassthroughInput } from './passthrough-commands.js';
+export { DAEMON_COMMANDS, PASSTHROUGH_COMMANDS };
 
 /**
  * Daemon commands that act on the chat itself rather than opening a
@@ -68,30 +74,6 @@ export const DAEMON_COMMANDS = new Set(['/close', '/restart', '/status', '/help'
  * that pollutes the dashboard's session list. Handle them without a session.
  */
 export const SESSIONLESS_DAEMON_COMMANDS = new Set(['/group', '/g', '/list-slash-command', '/slash', '/botconfig']);
-
-/**
- * Slash commands that are forwarded verbatim to the underlying CLI (e.g.
- * Claude Code's `/compact`, `/model`, `/usage`). The daemon does NOT handle
- * these — it just relays them to the worker via a raw_input IPC message,
- * bypassing the normal prompt-wrapping and bracketed-paste path so the CLI's
- * own slash-command parser sees them.
- */
-export const PASSTHROUGH_COMMANDS = new Set([
-  '/compact', '/model', '/clear', '/plugin', '/usage',
-  // 只读 / 低副作用，飞书卡片里能直接吐文本：
-  '/context', '/cost', '/mcp', '/diff',
-  '/code-review', '/security-review', '/review',
-  // Codex：/btw 向当前会话追加一条旁注/引导消息
-  '/btw',
-]);
-
-function normalizePassthroughCommand(cmd: unknown): string | null {
-  if (typeof cmd !== 'string') return null;
-  const normalized = cmd.trim().toLowerCase();
-  if (!/^\/[a-z0-9][a-z0-9:_-]*$/.test(normalized)) return null;
-  if (DAEMON_COMMANDS.has(normalized)) return null;
-  return normalized;
-}
 
 export function resolveAdapterDefaultPassthroughCommands(larkAppId?: string): string[] {
   if (!larkAppId) return [];
@@ -710,8 +692,14 @@ async function handleConfigCommand(
     const rawValue = parts.slice(2).join(' ').trim();
     if (!rawValue) { await reply(t('cmd.config.value_required', { field: spec.key }, loc)); return; }
 
-    let value: string | boolean;
+    let value: string | string[] | boolean;
     switch (spec.kind) {
+      case 'stringList': {
+        const arr = parseCustomPassthroughInput(rawValue);
+        if (arr.length === 0) { await reply(t('cmd.config.value_required', { field: spec.key }, loc)); return; }
+        value = arr;
+        break;
+      }
       case 'boolean': {
         const b = parseBooleanValue(rawValue);
         if (b === undefined) { await reply(t('cmd.config.invalid_bool', { field: spec.key, value: rawValue }, loc)); return; }

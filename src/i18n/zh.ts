@@ -336,6 +336,7 @@ export const messages: Record<string, string> = {
   'card.config.text_note': '改完点「保存」一次写入；某项留空 = 清除该项。角色较长/多行建议改用 `/role team set`。',
   'card.config.lbl_brand': '卡片签名（brandLabel）',
   'card.config.lbl_prompt': '入群首轮 prompt',
+  'card.config.lbl_passthrough': '额外放行的 slash 命令（逗号/空格分隔，如 /goal /export）',
   'card.config.lbl_role': '默认角色（team，跨群）',
   'card.config.save': '💾 保存',
   'card.config.back': '⬅ 返回配置',

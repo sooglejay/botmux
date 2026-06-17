@@ -333,6 +333,7 @@ export const messages: Record<string, string> = {
   'card.config.text_note': 'Edit then tap Save (one write); leaving a field blank clears it. For long/multi-line roles use `/role team set`.',
   'card.config.lbl_brand': 'Card signature (brandLabel)',
   'card.config.lbl_prompt': 'On-join first prompt',
+  'card.config.lbl_passthrough': 'Extra passthrough slash commands (comma/space separated, e.g. /goal /export)',
   'card.config.lbl_role': 'Default role (team, cross-chat)',
   'card.config.save': '💾 Save',
   'card.config.back': '⬅ Back to config',
