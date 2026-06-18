@@ -34,11 +34,8 @@ export const messages: Record<string, string> = {
   'card.status.selected': 'Selected',
   'card.status.waiting_screenshot': '_(Waiting for first screenshot…)_',
   'card.status.truncated_prefix': '… (truncated)',
-  'card.pending.title': 'Processing',
-  'card.pending.body': '🔄 Processing your request...',
   'card.pending.detoured_title': 'Sent',
   'card.pending.detoured_body': 'The final reply was sent to another target.',
-  'card.pending.mentioned_body': 'The final reply was sent as a new message.',
 
   // ─── Card body text ──────────────────────────────────────────────────────
   'card.body.cli_terminated': '{cliName} process has exited.',
@@ -261,7 +258,6 @@ export const messages: Record<string, string> = {
   'cmd.subdoc.mode_all': 'all new comments',
   'daemon.doc_comment_prefix': '[From a Feishu doc comment · {author}]',
   'daemon.doc_comment_reply_prefix': '↪ Reply to {author}: ',
-  'daemon.doc_comment_replied_card': '✅ Replied in the Feishu doc comments.',
   'cmd.adopt.already_adopted': 'This topic is already adopting {label} ({pane}).\nClick "Disconnect" on the card first, then run /adopt again (the original CLI is untouched).',
   'cmd.adopt.no_sessions': 'No adoptable CLI session found.',
   'cmd.adopt.pane_not_found': 'tmux pane not found: {pane}',

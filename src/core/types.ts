@@ -106,9 +106,6 @@ export interface DaemonSession {
   lastCliInput?: string;
   replyThreadAliases?: { [rootMessageId: string]: { createdAt: string; lastUsedAt: string } };
   currentReplyTarget?: { rootMessageId: string; turnId: string; updatedAt: string };
-  pendingResponseCardId?: string; // placeholder card patched by the first botmux send when streaming cards are disabled
-  pendingResponseCardState?: 'open' | 'patched';
-  lastPatchedResponseCardId?: string;
   currentTurnTitle?: string;      // title for the current turn's streaming card
   cardPatchInFlight?: boolean;    // true while a card PATCH is in-flight
   pendingCardJson?: string;       // queued card JSON — flushed when in-flight PATCH completes (latest wins)

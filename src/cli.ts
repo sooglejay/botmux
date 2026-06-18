@@ -73,6 +73,7 @@ import { type Brand, chatAppLink, larkHosts, normalizeBrand, sdkDomain } from '.
 import { mergeGlobalConfig, readGlobalConfig, setGlobalLocale, globalConfigPath } from './global-config.js';
 import { buildBridgeSendMarkerContent } from './services/bridge-fallback-gate.js';
 import { writeManualIntentIfAbsentTo } from './services/restart-intent-store.js';
+import { stripLegacyPendingCardFields } from './services/session-store.js';
 
 // Resolve the CLI's UI locale once from the global config file, so subsequent
 // CLI output (and any t() callers that don't pass an explicit locale) honour
@@ -1539,9 +1540,6 @@ interface SessionData {
   currentDocCommentTarget?: { fileToken: string; fileType: string; commentId: string; replyToName?: string; replyToOpenId?: string; turnId: string };
   quoteTargetSenderOpenId?: string;
   quoteTargetSenderIsBot?: boolean;
-  pendingResponseCardId?: string;
-  pendingResponseCardState?: 'open' | 'patched';
-  lastPatchedResponseCardId?: string;
   // Markers that a real CLI ever ran in this session (vs a daemon-command
   // scratch placeholder). Persisted by the daemon; only presence is checked
   // here, so they're typed loosely. Used by cmdList to avoid reporting an
@@ -1661,13 +1659,17 @@ function saveSession(session: SessionData): void {
   if (existsSync(fp)) {
     try { data = JSON.parse(readFileSync(fp, 'utf-8')); } catch { /* start fresh */ }
   }
-  data[session.sessionId] = mergePendingResponseState(session, data[session.sessionId]);
+  data[session.sessionId] = session;
 
-  // Clean up entries where file key doesn't match the entry's sessionId (data corruption)
+  // Clean up entries where file key doesn't match the entry's sessionId (data
+  // corruption), and strip legacy placeholder-card fields so the file converges
+  // to clean (see stripLegacyPendingCardFields in services/session-store).
   for (const [key, val] of Object.entries(data)) {
     if (val && typeof val === 'object' && 'sessionId' in val && (val as SessionData).sessionId !== key) {
       delete data[key];
+      continue;
     }
+    if (val && typeof val === 'object') stripLegacyPendingCardFields(val as unknown as Record<string, unknown>);
   }
 
   const tmpFp = fp + '.tmp';
@@ -3094,7 +3096,6 @@ function argValues(args: string[], ...flags: string[]): string[] {
 // daemon's bridge fallback path can produce identical cards. cmdSend
 // keeps using `buildImageCardElements` from there.
 import { buildImageCardElements, brandFooterSegment } from './im/lark/md-card.js';
-import { claimPendingResponseCard, markPendingResponseCardPatchedIfCurrent, mergePendingResponseState } from './core/pending-response.js';
 import { resolveBrandLabel } from './bot-registry.js';
 import { config } from './config.js';
 import { resolveQuoteTarget, validateMentionDecision, parseAttentionFlag, attentionUsageError } from './services/send-policy.js';
@@ -3366,17 +3367,6 @@ async function cmdSend(rest: string[]): Promise<void> {
         if (!existsSync(markerDir)) mkdirSync(markerDir, { recursive: true });
         appendFileSync(join(markerDir, `${sid}.jsonl`), JSON.stringify({ sentAtMs: Date.now(), messageId: `doc:${docTarget.commentId}`, contentLength: content.length }) + '\n');
       } catch { /* best-effort：漏记只多一条兜底 */ }
-      // 收尾飞书侧占位卡（streaming-disabled 会话）避免停在「处理中」。
-      try {
-        const pendingCardId = claimPendingResponseCard(s);
-        const latest = pendingCardId ? loadSessionFresh(s) : undefined;
-        if (pendingCardId && latest?.pendingResponseCardId === pendingCardId) {
-          const { updateMessage } = await import('./im/lark/client.js');
-          const { buildMarkdownCard } = await import('./im/lark/md-card.js');
-          await updateMessage(appId, pendingCardId, buildMarkdownCard(t('daemon.doc_comment_replied_card', undefined, loc), undefined, resolveBrandLabel(appId), loc));
-          if (markPendingResponseCardPatchedIfCurrent(latest, pendingCardId)) saveSession(latest);
-        }
-      } catch { /* best-effort */ }
       console.error(`✓ 已回复文档评论 ${docTarget.commentId.slice(0, 12)}（${chunks.length} 条）`);
       console.log(JSON.stringify({ success: true, commentId: docTarget.commentId, sessionId: sid, kind: 'doc-comment', chunks: chunks.length }));
     } catch (e: any) {

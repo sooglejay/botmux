@@ -301,10 +301,10 @@ describe('Bridge final_output delivery (P2 retry)', () => {
     expect(cardJson).toContain('<at id=ou_human></at>');
   });
 
-  it('delivers the answer as a fresh message even when a pending card is open (never patches)', async () => {
-    // The pending-card PATCH delivery was removed (message.patch is silent — no
-    // Feishu notification/unread). Even with an open pending card, the answer
-    // goes out as a brand-new reply, and the pending card is left untouched.
+  it('always delivers the answer as a fresh message (never PATCHes a card in place)', async () => {
+    // The placeholder pending-card + its PATCH delivery were removed entirely
+    // (message.patch is silent — no Feishu notification/unread). The bridge
+    // final-output now unconditionally goes out as a brand-new reply.
     const sessionReply = vi.fn(async () => 'om_reply');
     initWorkerPool({
       sessionReply,
@@ -314,8 +314,6 @@ describe('Bridge final_output delivery (P2 retry)', () => {
     });
 
     const ds = makeDs();
-    ds.session.pendingResponseCardId = 'om_pending';
-    ds.session.pendingResponseCardState = 'open';
     ds.session.quoteTargetId = 'om_user';
 
     const { __testOnly_deliverFinalOutput } = await import('../src/core/worker-pool.js') as any;

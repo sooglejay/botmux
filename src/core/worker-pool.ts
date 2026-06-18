@@ -44,7 +44,7 @@ import { prepareSessionSkillPrompt } from './skills/session-runtime.js';
 import { prepareSkillDelivery } from './skills/delivery.js';
 import type { DaemonToWorker, WorkerToDaemon, Session, DisplayMode } from '../types.js';
 import { sessionKey, sessionAnchorId, type DaemonSession } from './types.js';
-import { claimPendingResponseCard, DONE_REACTION_EMOJI_TYPE, markPendingResponseCardPatchedIfCurrent, syncPendingResponseState } from './pending-response.js';
+import { DONE_REACTION_EMOJI_TYPE } from './pending-response.js';
 import { buildTerminalUrl } from './terminal-url.js';
 import { prependBotmuxBin } from './botmux-wrapper.js';
 import { usageLimitStateKey, type CliUsageLimitState } from '../utils/cli-usage-limit.js';
@@ -2369,30 +2369,11 @@ function deliverFinalOutput(
       // 发表为文档评论（而非飞书卡片），状态卡/占位卡仍留在飞书会话起点。
       const docTurn = ds.docCommentTurns?.get(msg.turnId);
       if (docTurn) {
-        const loc = localeForBot(ds.larkAppId);
         // 嵌套回复到用户那条评论 thread（已挂在其下，无需再 ↪ 前缀）。这是兜底路径
         // （模型没显式 botmux send），默认 @ 回原评论人，仅首块加。
         const chunks = chunkCommentText(msg.content);
         for (let i = 0; i < chunks.length; i++) {
           await replyToDocComment(ds.larkAppId, { fileToken: docTurn.fileToken, fileType: docTurn.fileType }, docTurn.commentId, chunks[i], i === 0 ? docTurn.replyToOpenId : undefined);
-        }
-        // 收尾飞书侧占位卡（streaming-disabled 会话），避免停在「处理中」。
-        // streaming 卡（若开启）会在 idle 自行冻结，无需在此处理。
-        const donePendingId = claimPendingResponseCard(ds.session);
-        if (donePendingId) {
-          try {
-            await updateMessage(ds.larkAppId, donePendingId, buildMarkdownCard(
-              tr('daemon.doc_comment_replied_card', undefined, loc),
-              daemonCardFooterRecipientOpenId(ds, effectiveCliId),
-              resolveBrandLabel(ds.larkAppId),
-              loc,
-            ));
-            markPendingResponseCardPatchedIfCurrent(ds.session, donePendingId);
-            syncPendingResponseState(ds, ds.session);
-            sessionStore.updateSession(ds.session);
-          } catch (err: any) {
-            if (!(err instanceof MessageWithdrawnError)) logger.warn(`[${t}] failed to finalize 飞书 pending card for doc-comment turn: ${err?.message ?? err}`);
-          }
         }
         ds.docCommentTurns?.delete(msg.turnId);
         ds.lastBridgeEmittedUuid = msg.lastUuid;

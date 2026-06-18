@@ -37,11 +37,8 @@ export const messages: Record<string, string> = {
   'card.status.selected': '已选择',
   'card.status.waiting_screenshot': '_(等待第一张截图…)_',
   'card.status.truncated_prefix': '… (已截断)',
-  'card.pending.title': '处理中',
-  'card.pending.body': '🔄 正在处理你的请求...',
   'card.pending.detoured_title': '已发送',
   'card.pending.detoured_body': '最终回复已发送到其他目标。',
-  'card.pending.mentioned_body': '最终回复已通过新消息发送。',
 
   // ─── Card body text ──────────────────────────────────────────────────────
   'card.body.cli_terminated': '{cliName} 进程已终止。',
@@ -264,7 +261,6 @@ export const messages: Record<string, string> = {
   'cmd.subdoc.mode_all': '所有新评论',
   'daemon.doc_comment_prefix': '[来自飞书文档评论 · {author}]',
   'daemon.doc_comment_reply_prefix': '↪ 回复 {author}：',
-  'daemon.doc_comment_replied_card': '✅ 已回复到飞书文档的评论。',
   'cmd.adopt.already_adopted': '本话题已接入 {label} ({pane})。\n请先点击卡片上的「断开」按钮，再 /adopt 切换 CLI 会话（原 CLI 不受影响）。',
   'cmd.adopt.no_sessions': '未发现可接入的 CLI 会话',
   'cmd.adopt.pane_not_found': '未找到 tmux pane {pane}',

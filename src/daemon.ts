@@ -43,7 +43,7 @@ import type { CliId } from './adapters/cli/types.js';
 import * as scheduler from './core/scheduler.js';
 import { scanProjects, scanMultipleProjects } from './services/project-scanner.js';
 import { buildQuotaExhaustedCard, buildRepoSelectCard, buildStreamingCard, getCliDisplayName } from './im/lark/card-builder.js';
-import { RECEIVED_REACTION_EMOJI_TYPE, syncPendingResponseState } from './core/pending-response.js';
+import { RECEIVED_REACTION_EMOJI_TYPE } from './core/pending-response.js';
 import { t as tr, botLocale, localeForBot } from './i18n/index.js';
 import { createCliAdapterSync } from './adapters/cli/registry.js';
 import {
@@ -3049,8 +3049,6 @@ async function handleThreadReply(data: any, ctx: RoutingContext): Promise<void> 
   // reply cards to whoever triggered this turn — matters in oncall groups
   // where the caller is often not the session owner).
   if (ds) {
-    syncPendingResponseState(ds, readSessionFreshFromDisk(ds.session.sessionId, ds.larkAppId));
-    syncPendingResponseState(ds.session, ds);
     markSessionActivity(ds);
     const callerOpenId = parsed.senderId || data?.sender?.sender_id?.open_id;
     // quoteTargetId changes every inbound message (always a new message_id), so
