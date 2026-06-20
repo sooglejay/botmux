@@ -1,6 +1,6 @@
 import { createRequire } from 'node:module';
 import { readBotsJsonOrEmpty, writeBotsJsonAtomic } from '../setup/bots-store.js';
-import { normalizeBotConfig } from '../setup/bot-config-editor.js';
+import { normalizeBotConfig, findInvalidAllowedUserEntries, hasOwnerEntry } from '../setup/bot-config-editor.js';
 import { tryRegisterApp, type RegisterAppOptions, type RegisterAppResult } from '../setup/register-app.js';
 import { validateCredentials, buildRemainingSteps, type CredentialValidation, type RemainingStep } from '../setup/verify-permissions.js';
 import {
@@ -24,6 +24,9 @@ export type BotOnboardingStatus =
   | 'configuring_permissions'
   // 自动配置需要第二次扫码 (登录开放平台 Web 会话); 与建应用的 QR 不是同一个.
   | 'waiting_for_platform_scan'
+  // 扫码人身份无法被新 app 验证 → 不落盘空 allowedUsers 的开放 bot, 等用户在
+  // Dashboard 手动填写并通过校验的 owner 后才进入 completed (fail-closed).
+  | 'needs_owner'
   | 'completed'
   | 'failed';
 
@@ -233,49 +236,103 @@ export class BotOnboardingManager {
     // bots.json 已落盘——bot 本身已添加. 接下来跑 setup 同款开放平台自动配置
     // (导入权限 / 配 redirect / 建并发版). 这一步失败不回滚 bot, 只降级到
     // 手动权限步骤提示——和 `botmux setup` 的 finishOpenPlatformSetup 行为一致.
-    await this.configurePermissions(id, result.appId, result.brand, { cliId, workingDir, addedBotIndex });
+    const auto = await this.runPermissionAutomation(id, result.appId, result.brand, { cliId, workingDir });
+
+    // 关键顺序：先把 owner 解析/落盘, 再决定终态。completed 必须意味着「有一个
+    // 可解析的 owner」——绝不产出空 allowedUsers 的可启动 bot：运行时把「无任何
+    // 白名单」判成「全开放」, 任何能触达该 bot 的人都能做 /grant 等 operate 操作
+    // (fail-open)。把 completed 放在 owner 落盘之后, 也消掉「completed 早于 owner
+    // 写入、用户抢先重启 daemon 以开放模式起」的竞态。
+    let ownerWritten = false;
     if (result.userOpenId) {
-      // registerApp 返回的 open_id 来自扫码链路；等权限自动配置跑完后，再用新 app
-      // 自身验证。验证失败时不 fallback 写入该 ou_，避免把其他 app 视角的
-      // open_id 固化成 owner，导致 /grant 和授权卡片一直判 non-owner。
-      await this.applyScannerAllowedUser(result.appId, result.appSecret, result.userOpenId, result.brand);
+      // registerApp 返回的 open_id 来自扫码链路; 用新 app 自身凭证验证, 失败不
+      // fallback 写入该 (常为跨 app 的) ou_——避免把其他 app 视角的 open_id 固化
+      // 成 owner, 导致 /grant 和授权卡片一直判 non-owner。
+      ownerWritten = await this.applyScannerAllowedUser(result.appId, result.appSecret, result.userOpenId, result.brand);
     }
+
+    // 扫码 owner 写不进去 → needs_owner, 由前端引导用户手动填写并校验后再 complete。
+    this.finalizePermissions(id, result.appId, result.brand, addedBotIndex, auto, ownerWritten ? 'completed' : 'needs_owner');
   }
 
+  /** 返回 true 表示已把可验证的扫码人身份写进 allowedUsers (或已存在 owner)。 */
   private async applyScannerAllowedUser(
     appId: string,
     appSecret: string,
     scannerOpenId: string,
     brand: Brand,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const allowedUser = await resolveScannerAllowedUser(appId, appSecret, scannerOpenId, brand);
-    if (!allowedUser) return;
+    if (!allowedUser) return false;
 
     const bots = readBotsJsonOrEmpty(this.opts.botsJsonPath);
     const index = bots.findIndex((bot: any) => bot?.larkAppId === appId);
-    if (index < 0) return;
+    if (index < 0) return false;
     const current = bots[index] as Record<string, any>;
-    if (Array.isArray(current.allowedUsers) && current.allowedUsers.length > 0) return;
+    if (Array.isArray(current.allowedUsers) && current.allowedUsers.length > 0) return true;
 
     const next = [...bots];
     next[index] = normalizeBotConfig({ ...current, allowedUsers: [allowedUser] });
     writeBotsJsonAtomic(this.opts.botsJsonPath, next);
+    return true;
   }
 
   /**
-   * 跑开放平台权限自动配置. 复用 setup 的 automateOpenPlatformSetup:
-   * - 缓存命中 (~/.botmux/feishu-session.json 有效) → 静默自动配置, 不出二维码
-   * - 否则 → 通过 onQrCode 抛出第二个二维码 (登录开放平台), 前端渲染让用户扫
-   * - 成功 → completed + 权限摘要; 失败 → completed + 手动步骤 (buildRemainingSteps)
-   *
-   * 无论自动配置成败, bot 都已写入 bots.json, 所以终态恒为 'completed'.
+   * 用户在 needs_owner 状态下手动提交 owner。先做格式校验, 再用新 app 凭证 best-effort
+   * 校验「填的身份在本应用里是否可用」：只对能确凿判定的错误 (跨 app 的 ou_ / 不在本
+   * 企业的邮箱) 拒绝；scope 未生效 / 权限不足 / 网络错误等无法证伪的情况不拦截, 避免把
+   * 用户永久卡在 needs_owner。校验通过才落盘 allowedUsers 并进入 completed。
    */
-  private async configurePermissions(
+  async submitOwner(id: string, rawEntries: string[]): Promise<{ ok: boolean; error?: string; message?: string }> {
+    const job = this.jobs.get(id);
+    if (!job) return { ok: false, error: 'unknown_onboarding_job' };
+    if (job.status !== 'needs_owner') return { ok: false, error: 'not_awaiting_owner' };
+    const appId = job.appId;
+    if (!appId) return { ok: false, error: 'missing_app' };
+
+    const entries = rawEntries.map(e => e.trim()).filter(Boolean);
+    const invalid = findInvalidAllowedUserEntries(entries);
+    if (invalid.length > 0) {
+      return { ok: false, error: 'invalid_entries', message: `不是完整邮箱、union_id(on_) 或 open_id(ou_)：${invalid.join(', ')}` };
+    }
+    if (!hasOwnerEntry(entries)) {
+      return { ok: false, error: 'no_owner', message: '至少需要一个完整邮箱、union_id(on_) 或 open_id(ou_) 作为 owner。' };
+    }
+
+    const bots = readBotsJsonOrEmpty(this.opts.botsJsonPath);
+    const index = bots.findIndex((bot: any) => bot?.larkAppId === appId);
+    if (index < 0) return { ok: false, error: 'missing_app' };
+    const current = bots[index] as Record<string, any>;
+    const appSecret = typeof current.larkAppSecret === 'string' ? current.larkAppSecret : '';
+    const brand: Brand = job.brand ?? 'feishu';
+
+    const unusable = await detectUnusableOwnerEntries(appId, appSecret, brand, entries);
+    if (unusable.length > 0) {
+      return {
+        ok: false,
+        error: 'unusable_owner',
+        message: `以下身份在当前应用里无法解析（可能是其他应用的 open_id，或邮箱不在本企业）：${unusable.join(', ')}。请改用本企业邮箱或 union_id(on_)。`,
+      };
+    }
+
+    const next = [...bots];
+    next[index] = normalizeBotConfig({ ...current, allowedUsers: entries });
+    writeBotsJsonAtomic(this.opts.botsJsonPath, next);
+    this.patch(id, { status: 'completed' });
+    return { ok: true };
+  }
+
+  /**
+   * 跑开放平台权限自动配置 (复用 setup 的 automateOpenPlatformSetup)。只负责把进度
+   * 推给前端 (configuring_permissions / waiting_for_platform_scan) 并返回结果——终态
+   * 由调用方在 owner 落盘后统一决定 (见 finalizePermissions)。
+   */
+  private async runPermissionAutomation(
     id: string,
     appId: string,
     brand: 'feishu' | 'lark',
-    meta: { cliId: string; workingDir: string; addedBotIndex: number },
-  ): Promise<void> {
+    meta: { cliId: string; workingDir: string },
+  ): Promise<OpenPlatformAutomationResult> {
     this.patch(id, {
       status: 'configuring_permissions',
       appId,
@@ -283,9 +340,8 @@ export class BotOnboardingManager {
       workingDir: meta.workingDir,
     });
 
-    let auto: OpenPlatformAutomationResult;
     try {
-      auto = await this.automateOpenPlatform({
+      return await this.automateOpenPlatform({
         appId,
         brand,
         onQrCode: info => {
@@ -303,36 +359,38 @@ export class BotOnboardingManager {
       });
     } catch (err) {
       // automation 不应抛 (内部已结构化返回), 兜底当作失败 → 手动步骤.
-      auto = {
+      return {
         ok: false,
         reason: 'api_error',
         message: err instanceof Error ? err.message : String(err),
       };
     }
+  }
 
-    if (auto.ok) {
-      this.patch(id, {
-        status: 'completed',
-        addedBotIndex: meta.addedBotIndex,
-        platformQrDataUrl: undefined,
-        permission: {
+  /** 在 owner 落盘后统一落终态：completed (有 owner) 或 needs_owner (待用户手动填)。 */
+  private finalizePermissions(
+    id: string,
+    appId: string,
+    brand: 'feishu' | 'lark',
+    addedBotIndex: number,
+    auto: OpenPlatformAutomationResult,
+    status: 'completed' | 'needs_owner',
+  ): void {
+    const permission: BotOnboardingPermission = auto.ok
+      ? {
           ok: true,
           scopeCount: auto.scopeCount,
           skippedScopeCount: auto.skippedScopeCount,
           versionId: auto.versionId,
           scopeWarning: auto.scopeWarning,
-        },
-      });
-      return;
-    }
-
-    // 自动配置失败: bot 已添加, 给手动权限步骤 (与 setup 失败回退一致).
+        }
+      : { ok: false, reason: auto.reason, message: auto.message };
     this.patch(id, {
-      status: 'completed',
-      addedBotIndex: meta.addedBotIndex,
+      status,
+      addedBotIndex,
       platformQrDataUrl: undefined,
-      permission: { ok: false, reason: auto.reason, message: auto.message },
-      remainingSteps: buildRemainingSteps(appId, brand),
+      permission,
+      ...(auto.ok ? {} : { remainingSteps: buildRemainingSteps(appId, brand) }),
     });
   }
 }
@@ -354,4 +412,57 @@ async function resolveScannerAllowedUser(appId: string, appSecret: string, openI
     }
   } catch { /* do not trust scanner open_id when verification fails */ }
   return undefined;
+}
+
+// 跨 app open_id 的固定错误码：用本 app 凭证查别的 app 视角的 ou_ 必返这个。
+const CROSS_APP_OPEN_ID_CODE = 99992361;
+
+/**
+ * best-effort 找出「确凿不可用」的 owner 条目, 供 submitOwner 拒绝。只在能明确判定时
+ * 才判不可用——避免 scope 未生效 / 权限不足 / 网络错误时把合法条目误杀:
+ *   - ou_：本 app 查到跨 app 错误码 (99992361) → 不可用 (典型误填别的 app 的 open_id)。
+ *   - 邮箱：batchGetId 成功返回但该邮箱没有对应 user → 不可用 (不在本企业)。
+ *   - on_：union_id 无法构造确凿的「不属于本 app」信号, 一律放行 (留给运行时解析)。
+ * 任何抛错 / 非确定性响应都视为「无法证伪」→ 不计入 unusable。
+ */
+async function detectUnusableOwnerEntries(
+  appId: string,
+  appSecret: string,
+  brand: Brand,
+  entries: string[],
+): Promise<string[]> {
+  if (!appSecret) return [];
+  let client: any;
+  try {
+    client = new Lark.Client({ appId, appSecret, domain: sdkDomain(brand), disableTokenCache: false });
+  } catch {
+    return [];
+  }
+  const unusable: string[] = [];
+  for (const entry of entries) {
+    try {
+      if (entry.startsWith('ou_')) {
+        const res = await client.contact.v3.user.get({
+          path: { user_id: entry },
+          params: { user_id_type: 'open_id' },
+        });
+        if (res?.code === CROSS_APP_OPEN_ID_CODE) unusable.push(entry);
+      } else if (entry.startsWith('on_')) {
+        // union_id：无确凿的跨 app 否定信号, 放行。
+        continue;
+      } else {
+        const res = await client.contact.v3.user.batchGetId({
+          params: { user_id_type: 'open_id' },
+          data: { emails: [entry], include_resigned: false },
+        });
+        // 单封邮箱查询：成功响应里没有任何带 user_id 的条目 → 确凿不在本企业。
+        // 用「是否存在 user_id」而非「邮箱精确匹配」判定, 避开 API 侧邮箱规范化误杀。
+        if (res?.code === 0) {
+          const list: any[] = res.data?.user_list ?? [];
+          if (!list.some(u => u?.user_id)) unusable.push(entry);
+        }
+      }
+    } catch { /* 无法证伪：不计入 unusable */ }
+  }
+  return unusable;
 }

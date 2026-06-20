@@ -977,6 +977,33 @@ const server = createServer(async (req, res) => {
       const job = botOnboarding.start({ cliId, wrapperCli, workingDir, model });
       return jsonRes(res, 202, { job: botOnboarding.get(job.id) });
     }
+    let mOwner: RegExpMatchArray | null;
+    if (req.method === 'POST' && (mOwner = url.pathname.match(/^\/api\/bot-onboarding\/([^/]+)\/owner$/))) {
+      // needs_owner 状态下用户手动提交 owner：扫码人身份验证不了时的兜底入口。
+      // submitOwner 内部做格式 + 可用性校验, 通过才落盘并转 completed。
+      const onboardingId = decodeURIComponent(mOwner[1]);
+      let parsedOwner: { owner?: unknown; allowedUsers?: unknown };
+      try {
+        const chunks: Buffer[] = [];
+        for await (const c of req) chunks.push(c as Buffer);
+        const raw = Buffer.concat(chunks).toString('utf8');
+        parsedOwner = raw ? JSON.parse(raw) : {};
+      } catch {
+        return jsonRes(res, 400, { ok: false, error: 'bad_json' });
+      }
+      // 接受 owner 字符串 (逗号/空白分隔) 或 allowedUsers 数组。
+      const entries = Array.isArray(parsedOwner.allowedUsers)
+        ? parsedOwner.allowedUsers.filter((v): v is string => typeof v === 'string')
+        : typeof parsedOwner.owner === 'string'
+          ? parsedOwner.owner.split(/[,\s]+/).map(s => s.trim()).filter(Boolean)
+          : [];
+      const r = await botOnboarding.submitOwner(onboardingId, entries);
+      if (!r.ok) {
+        const status = r.error === 'unknown_onboarding_job' ? 404 : 400;
+        return jsonRes(res, status, r);
+      }
+      return jsonRes(res, 200, { job: botOnboarding.get(onboardingId) });
+    }
     let mOnboard: RegExpMatchArray | null;
     if (req.method === 'GET' && (mOnboard = url.pathname.match(/^\/api\/bot-onboarding\/([^/]+)$/))) {
       const job = botOnboarding.get(decodeURIComponent(mOnboard[1]));
