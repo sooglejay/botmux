@@ -362,15 +362,16 @@ export async function noteTurnReceived(ds: DaemonSession, triggerMessageId: stri
   // placeholder + patch-delivery was removed; answers now always go out as a
   // fresh message (deliverFinalOutput / `botmux send`).
   //
-  // This call site is the per-message acceptance point, so it now drives the
-  // two-phase turn reaction (bot config `enableReactions`, default off): react
-  // 冲! on the triggering message the instant it's accepted. Binding to the
+  // This call site is the per-message acceptance point, so it also drives the
+  // two-phase turn reaction. It's auto-enabled exactly for card-off sessions
+  // (streaming card disabled): those have no live status card, so the ✋→✅ on
+  // the user's message is the only lightweight progress signal. When the
+  // streaming card is on it already shows status, so we stay silent.
+  // React 冲! on the triggering message the instant it's accepted. Binding to the
   // message — not a worker status edge — means type-ahead / busy-batched messages
   // each get their own ✋. `finishTurnReactions` flips every pending ✋ to ✅ when
   // the worker next goes idle.
-  let enabled: boolean;
-  try { enabled = getBot(ds.larkAppId).config.enableReactions === true; } catch { return; }
-  if (!enabled) return;
+  if (!streamingCardDisabledFor(ds)) return;
   // Only Lark messages carry reactions — doc-comment ids / chat anchors can't.
   if (!triggerMessageId.startsWith('om_')) return;
   if ((ds.pendingAckReactions ??= []).some(a => a.messageId === triggerMessageId)) return;

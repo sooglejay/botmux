@@ -87,8 +87,8 @@ export interface DaemonSession {
    *  command so a user can manually summon a live card in an otherwise-quiet
    *  session. In-memory only (resets on daemon restart). */
   streamingCardForced?: boolean;
-  /** Two-phase turn reactions (bot config `enableReactions`, default off). The
-   *  bot reacts 冲! on each user message the moment it's accepted for the session
+  /** Two-phase turn reactions (auto-on for card-off sessions, i.e. streaming
+   *  card disabled). The bot reacts 冲! on each user message the moment it's accepted for the session
    *  (bound to the message, NOT a worker status edge — so type-ahead / busy-
    *  batched messages each get their own reaction). Every pending ✋ here is
    *  flipped to ✅ when the turn returns to idle. In-memory only (a daemon

@@ -318,7 +318,6 @@ export const messages: Record<string, string> = {
   'card.config.p2p.thread': '🧵 thread (separate session/DM)',
   'card.config.p2p.chat': '💬 chat (continuous session)',
   'config.label.disableStreamingCard': 'Disable live card',
-  'config.label.enableReactions': 'Received/done reactions',
   'config.label.writableTerminalLinkInCard': 'Writable terminal in card',
   'config.label.privateCard': 'Private snapshot card',
   'config.label.autoStartOnGroupJoin': 'Auto-start on join',

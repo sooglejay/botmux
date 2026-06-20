@@ -2310,8 +2310,8 @@ function setupWorkerHandlers(ds: DaemonSession, worker: ChildProcess): void {
 const FINAL_OUTPUT_RETRY_BACKOFF_MS = [0, 5000, 15000];  // immediate, +5s, +15s
 
 /**
- * Turn-end half of the two-phase turn reactions (bot config `enableReactions`,
- * default off). The 冲! "received" reactions are added per-message at the daemon
+ * Turn-end half of the two-phase turn reactions (auto-on for card-off sessions,
+ * i.e. streaming card disabled). The 冲! "received" reactions are added per-message at the daemon
  * acceptance point (`noteTurnReceived`); when the worker next returns to idle we
  * flip every pending ✋ on this session to ✅ DONE and clear the list. Binding the
  * start to the message (not a status edge) means type-ahead / busy-batched

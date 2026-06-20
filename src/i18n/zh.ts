@@ -321,7 +321,6 @@ export const messages: Record<string, string> = {
   'card.config.p2p.thread': '🧵 thread（每条 DM 独立会话）',
   'card.config.p2p.chat': '💬 chat（连续单聊会话）',
   'config.label.disableStreamingCard': '关闭实时卡片',
-  'config.label.enableReactions': '收到/完成表情',
   'config.label.writableTerminalLinkInCard': '卡内嵌可写终端',
   'config.label.privateCard': '私有快照卡',
   'config.label.autoStartOnGroupJoin': '进群即开工',

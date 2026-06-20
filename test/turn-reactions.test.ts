@@ -1,5 +1,5 @@
 /**
- * Two-phase turn reactions (bot config `enableReactions`, default off):
+ * Two-phase turn reactions (auto-on for card-off sessions, i.e. streaming card disabled):
  *   - noteTurnReceived(ds, msgId): react 冲! (GoGoGo) the instant a user message
  *     is accepted for the session, tracked per-message in ds.pendingAckReactions.
  *   - finishTurnReactions(ds): when the worker next goes idle, flip every pending
@@ -43,13 +43,15 @@ function makeDs(over: Partial<DaemonSession> = {}): DaemonSession {
   return { session, larkAppId: APP, chatId: 'oc_x', scope: 'chat', ...over } as unknown as DaemonSession;
 }
 
-function registerWith(enableReactions: boolean) {
+// Reactions are auto-on for card-off sessions, so the gate is driven by
+// disableStreamingCard (streaming card on → no reactions; off → reactions).
+function registerWith(reactionsOn: boolean) {
   registerBot({
     larkAppId: APP,
     larkAppSecret: 's',
     cliId: 'claude-code',
     allowedUsers: ['ou_o'],
-    enableReactions: enableReactions || undefined,
+    disableStreamingCard: reactionsOn || undefined,
   });
 }
 
@@ -61,7 +63,7 @@ describe('two-phase turn reactions', () => {
     mocks.removeReaction.mockResolvedValue(undefined);
   });
 
-  it('enableReactions off (default): no reaction on receipt', async () => {
+  it('streaming card on (default): no reaction on receipt', async () => {
     registerWith(false);
     const ds = makeDs();
     await noteTurnReceived(ds, 'om_a');
