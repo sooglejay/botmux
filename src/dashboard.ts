@@ -2406,9 +2406,10 @@ federationSync.unref();
 // 中心化平台隧道（已绑定才启动；每台机器一个，跑在 dashboard 进程里）
 let platformTunnel: { stop(): void } | null = null;
 function readBotmuxVersion(): string {
+  // 与本地 dashboard「版本与更新」卡同源：源码 checkout 的 package.json 是占位的 0.0.0，
+  // resolveCurrentVersion() 会用 git describe 推出真实版本（如 2.91.1），npm 安装则用 package.json。
   try {
-    const pkg = JSON.parse(readFileSync(join(dirname(__dirname), 'package.json'), 'utf8'));
-    return pkg.version || 'unknown';
+    return resolveCurrentVersion();
   } catch {
     return 'unknown';
   }
