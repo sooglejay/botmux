@@ -18,6 +18,7 @@
  * skip polling while the tab is hidden; stop once the run is terminal).
  */
 import { renderNodeTerminal } from './v3-terminal.js';
+import { legacyWorkflowDetailHash } from './legacy-workflow-link.js';
 import type { RunView, RunNodeView } from '../../workflows/v3/ops-projection.js';
 
 const POLL_MS = 2000;
@@ -510,8 +511,7 @@ function renderV3DetailPage(root: HTMLElement, runId: string): () => void {
           try {
             const v2 = await fetch(`/api/workflows/runs/${encodeURIComponent(runId)}/snapshot`);
             if (v2.ok && !disposed) {
-              const q = location.hash.split('?')[1];
-              window.location.replace(`#/legacy-workflow/${encodeURIComponent(runId)}${q ? `?${q}` : ''}`);
+              window.location.replace(legacyWorkflowDetailHash(runId, location.hash.split('?')[1]));
               return;
             }
           } catch { /* fall through to not-found */ }
