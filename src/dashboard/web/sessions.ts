@@ -73,6 +73,11 @@ const CLI_FILTER_OPTIONS = [
 
 type BoardColumnId = 'needs-you' | 'starting' | 'working' | 'idle';
 
+// 顶部 attention strip「立即处理」重复点击同一焦点项时，hash 不变、route() 不跑，
+// 改派发 'botmux:focus-session' 事件。这里保留上一次的监听器引用，避免每次进
+// sessions 页都累积一个新监听器（renderSessionsPage 没有 dispose 钩子）。
+let prevFocusHandler: ((e: Event) => void) | null = null;
+
 const BOARD_COLUMNS: Array<{ id: BoardColumnId; labelKey: string; hintKey: string }> = [
   { id: 'needs-you', labelKey: 'sessions.board.needsYou', hintKey: 'sessions.board.needsYouHint' },
   { id: 'starting', labelKey: 'sessions.board.starting', hintKey: 'sessions.board.startingHint' },
@@ -2351,4 +2356,32 @@ export function renderSessionsPage(root: HTMLElement) {
   rerender();
   // bot 友好名 / 群聊标题异步解析，回来后补一次重绘（首帧先显示原值）
   void loadNameMaps().then(rerender);
+
+  // ── 焦点定位：从 URL ?focus=<sessionId> 或 'botmux:focus-session' 事件 ──
+  // 顶部 attention strip 的「立即处理」会带 focus 参数跳过来；重复点击同一项
+  // 时 hash 不变，strip 改派发事件，这里就地重新聚焦（滚动 + 高亮 + 打开抽屉）。
+  function applyFocus(id: string): void {
+    const target = store.sessions.get(id);
+    const sel = `.session-card[data-id="${CSS.escape(id)}"], .kanban-card[data-id="${CSS.escape(id)}"], tr[data-id="${CSS.escape(id)}"]`;
+    const card = root.querySelector<HTMLElement>(sel);
+    if (card) {
+      card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      card.classList.add('flash-focus');
+      setTimeout(() => card.classList.remove('flash-focus'), 1600);
+    }
+    // drawer 是 modal：打开时 strip 在遮罩后点不到，故重复聚焦时 drawer 必为关；
+    // 仍加守卫，避免对未来非 modal 场景调 showModal() 抛 InvalidStateError。
+    if (target && !drawer.open) openDrawer(target);
+  }
+
+  const query = location.hash.split('?')[1];
+  const initialFocus = query ? new URLSearchParams(query).get('focus') : null;
+  if (initialFocus) applyFocus(initialFocus);
+
+  if (prevFocusHandler) document.removeEventListener('botmux:focus-session', prevFocusHandler);
+  prevFocusHandler = (e: Event) => {
+    const sid = (e as CustomEvent).detail?.sessionId;
+    if (sid) applyFocus(String(sid));
+  };
+  document.addEventListener('botmux:focus-session', prevFocusHandler);
 }

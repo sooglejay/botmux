@@ -3334,6 +3334,21 @@ input.row-select,
   .attention-strip-ic { animation: none; }
 }
 
+/* 「立即处理」聚焦到的会话卡片：短暂高亮 + 描边，引导视线落到目标项。 */
+.flash-focus {
+  outline: 2px solid var(--warning);
+  outline-offset: 2px;
+  animation: flash-focus 1.6s ease-out 1;
+}
+@keyframes flash-focus {
+  0%   { background: color-mix(in srgb, var(--warning) 38%, transparent); }
+  60%  { background: color-mix(in srgb, var(--warning) 16%, transparent); }
+  100% { background: transparent; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .flash-focus { animation: none; }
+}
+
 /* ── 胶囊化：按钮 / 标签 / 分段控件 ──────────────────────────────────────── */
 button,
 .btn-link {

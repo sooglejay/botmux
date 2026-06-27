@@ -132,6 +132,8 @@ function paintAttentionStrip(): void {
     return;
   }
   const longest = pending[0];
+  const focusId = String(longest.s.sessionId);
+  const focusHash = `#/sessions?focus=${encodeURIComponent(focusId)}`;
   const html = `
     <span class="attention-strip-ic" aria-hidden="true">!</span>
     <b>${escapeHtml(t('strip.pending', { count: pending.length }))}</b>
@@ -140,12 +142,25 @@ function paintAttentionStrip(): void {
       bot: botDisplayName(longest.s),
       reason: longest.reason,
     }))}</span>
-    <a class="attention-strip-go" href="#/sessions">${escapeHtml(t('strip.handle'))}</a>`;
+    <a class="attention-strip-go" href="${escapeHtml(focusHash)}">${escapeHtml(t('strip.handle'))}</a>`;
   el.hidden = false;
   // 内容没变就不重写 — innerHTML 重建会把 strip-pulse 动画打回起点（视觉跳变）
   if (html === lastStripHtml) return;
   lastStripHtml = html;
   el.innerHTML = html;
+
+  // 「立即处理」跳到会话页并定位到最久等待的会话。当用户已经在该焦点 URL 上
+  // （重复点击同一项）时 hash 不会变 → hashchange 不触发 → route() 不跑，
+  // 改派发自定义事件，让 sessions 页就地重新聚焦（滚动 + 高亮 + 打开抽屉）。
+  const goBtn = el.querySelector<HTMLAnchorElement>('.attention-strip-go');
+  if (goBtn) {
+    goBtn.addEventListener('click', ev => {
+      if (location.hash === focusHash) {
+        ev.preventDefault();
+        document.dispatchEvent(new CustomEvent('botmux:focus-session', { detail: { sessionId: focusId } }));
+      }
+    });
+  }
 }
 store.on(paintAttentionStrip);
 // bot 友好名异步解析回来后刷一次 strip（页面级重绘由各 mount 自己处理）
