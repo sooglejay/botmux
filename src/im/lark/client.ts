@@ -1465,6 +1465,32 @@ export async function resolveUserUnionId(larkAppId: string, openId: string): Pro
   return {};
 }
 
+
+/**
+ * Resolve a Feishu user's email prefix (the part before `@`) from their open_id.
+ * Used for branch naming like `p/<emailPrefix>/<feature>`.
+ * Returns `undefined` when the contact API doesn't return an email (e.g. missing
+ * `contact:user.email:readonly` scope, or the user is a bot).
+ */
+export async function resolveUserEmailPrefix(larkAppId: string, openId: string): Promise<string | undefined> {
+  if (!openId) return undefined;
+  try {
+    const c = getBotClient(larkAppId);
+    const res = await larkGet(c, `/open-apis/contact/v3/users/${encodeURIComponent(openId)}`, { user_id_type: 'open_id' });
+    if (res.code === 0 && res.data?.user) {
+      const email: string | undefined = res.data.user.email ?? res.data.user.enterprise_email;
+      if (email) {
+        const prefix = email.split('@')[0]?.toLowerCase();
+        if (prefix) return prefix;
+      }
+    }
+    logger.debug(`[resolveUserEmailPrefix] no email for ${openId.substring(0, 12)}`);
+  } catch (err: any) {
+    logger.debug(`[resolveUserEmailPrefix] failed for ${openId.substring(0, 12)}: ${err?.message ?? err}`);
+  }
+  return undefined;
+}
+
 export async function resolveAllowedUsers(larkAppId: string, raw: string[]): Promise<string[]> {
   return (await resolveAllowedUsersWithMap(larkAppId, raw)).resolved;
 }

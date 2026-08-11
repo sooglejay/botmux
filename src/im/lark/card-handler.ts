@@ -8,7 +8,7 @@ import { basename as pathBasename, dirname, join } from 'node:path';
 import { config } from '../../config.js';
 import { getBot, getAllBots, getOwnerOpenId } from '../../bot-registry.js';
 import { canOperate, canTalk } from './event-dispatcher.js';
-import { updateMessage, deleteMessage, replyMessage, sendMessage, sendUserMessage, sendEphemeralCard, getMessageDetail, isHumanOpenId, resolveUserUnionId as defaultResolveUserUnionId } from './client.js';
+import { updateMessage, deleteMessage, replyMessage, sendMessage, sendUserMessage, sendEphemeralCard, getMessageDetail, isHumanOpenId, resolveUserUnionId as defaultResolveUserUnionId, resolveUserEmailPrefix } from './client.js';
 import { buildSessionCard, buildStreamingCard, buildTuiPromptCard, buildTuiPromptProcessingCard, buildGrantResultCard, getCliDisplayName, truncateContent, buildConfigCard, buildConfigQuotaCard, buildConfigTextCard, CONFIG_UNSET, buildRepoSelectCard } from './card-builder.js';
 import { codexServiceTierBadge } from '../../services/codex-service-tier.js';
 import {
@@ -3466,10 +3466,12 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
         try {
           const branch = action?.value?.branch?.trim() || undefined;
           const slug = branch ? undefined : await worktreeSlugFromContextAI(targetDs.session.title, targetDs.pendingPrompt);
+          const cardUserPrefix = operatorOpenId ? await resolveUserEmailPrefix(larkAppId!, operatorOpenId).catch(() => undefined) : undefined;
           for (const repoPath of selectedWorktreePaths) {
             const result = await createRepoWorktree(repoPath, {
               branch,
               slug,
+              userPrefix: cardUserPrefix,
               worktreePath: selectedWorktreePaths.length > 1 && parentPath
                 ? join(parentPath, worktreeChildNameForRepo(repoPath, cached))
                 : undefined,

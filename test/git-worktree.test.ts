@@ -264,4 +264,66 @@ describe('worktree semantic slug helpers', () => {
     expect(slugFromWorktreeText('看下新开工作树的命名逻辑')).toBeUndefined();
     expect(localWorktreeSlugFromContext('修复卡片重复点击')).toBeUndefined();
   });
+  it('creates p/<userPrefix>/<slug> branch when userPrefix is provided', async () => {
+    const upstream = makeUpstream('upstream');
+    const repo = makeClone(upstream, 'proj');
+
+    const res = await createRepoWorktree(repo, { slug: 'Fix Repo WT naming!', userPrefix: 'jiangwei' });
+
+    expect(res.branch).toBe('p/jiangwei/fix-repo-wt-naming');
+    expect(res.path).toBe(join(tempRoot, 'proj-p-jiangwei-fix-repo-wt-naming'));
+    expect(git(res.path, 'rev-parse', '--abbrev-ref', 'HEAD')).toBe('p/jiangwei/fix-repo-wt-naming');
+  });
+
+  it('auto-increments p/<userPrefix>/<slug> branch on collision', async () => {
+    const upstream = makeUpstream('upstream');
+    const repo = makeClone(upstream, 'proj');
+
+    const first = await createRepoWorktree(repo, { slug: 'Fix Repo WT naming!', userPrefix: 'jiangwei' });
+    const second = await createRepoWorktree(repo, { slug: 'Fix Repo WT naming!', userPrefix: 'jiangwei' });
+
+    expect(first.branch).toBe('p/jiangwei/fix-repo-wt-naming');
+    expect(second.branch).toBe('p/jiangwei/fix-repo-wt-naming-2');
+    expect(second.path).toBe(join(tempRoot, 'proj-p-jiangwei-fix-repo-wt-naming-2'));
+  });
+
+  it('falls back to p/jiangwei.sooglejay/<slug> when userPrefix is not provided', async () => {
+    const upstream = makeUpstream('upstream');
+    const repo = makeClone(upstream, 'proj');
+
+    const res = await createRepoWorktree(repo, { slug: 'Fix Repo WT naming!' });
+
+    expect(res.branch).toBe('p/jiangwei.sooglejay/fix-repo-wt-naming');
+    expect(res.path).toBe(join(tempRoot, 'proj-p-jiangwei.sooglejay-fix-repo-wt-naming'));
+  });
+
+  it('sanitizes userPrefix to ascii-safe characters', async () => {
+    const upstream = makeUpstream('upstream');
+    const repo = makeClone(upstream, 'proj');
+
+    const res = await createRepoWorktree(repo, { slug: 'My Feature', userPrefix: 'user.name+tag@example.com' });
+
+    expect(res.branch).toBe('p/user.name-tag-example.com/my-feature');
+    expect(res.path).toBe(join(tempRoot, 'proj-p-user.name-tag-example.com-my-feature'));
+  });
+
+  it('falls back to p/jiangwei.sooglejay/<slug> when userPrefix is empty after sanitization', async () => {
+    const upstream = makeUpstream('upstream');
+    const repo = makeClone(upstream, 'proj');
+
+    const res = await createRepoWorktree(repo, { slug: 'My Feature', userPrefix: '   ' });
+
+    expect(res.branch).toBe('p/jiangwei.sooglejay/my-feature');
+    expect(res.path).toBe(join(tempRoot, 'proj-p-jiangwei.sooglejay-my-feature'));
+  });
+
+
+  it('extracts the numeric ID from a Meego requirement link as slug', () => {
+    expect(slugFromWorktreeText('https://meego.larkoffice.com/aweme/story/detail/6835710038')).toBe('6835710038');
+    expect(slugFromWorktreeText('需求：https://meego.larkoffice.com/aweme/story/detail/6835710038 实现飞书卡片')).toBe('6835710038');
+  });
+
+  it('prefers Meego ID over other latin tokens', () => {
+    expect(slugFromWorktreeText('实现需求 https://meego.larkoffice.com/aweme/story/detail/6835710038')).toBe('6835710038');
+  });
 });

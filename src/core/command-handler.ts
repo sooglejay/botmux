@@ -20,7 +20,7 @@ import { handleDashboardCommand } from './dashboard-command/index.js';
 import { createCliAdapterSync } from '../adapters/cli/registry.js';
 import type { CliId, ResumableSession } from '../adapters/cli/types.js';
 import { resolveCliRuntime, runtimeInstallationKey } from '../adapters/cli/runtime.js';
-import { deleteMessage, sendMessage, sendUserMessage, replyMessage, listChatBotMembers, resolveUserUnionId, getChatModeStrict, getMessageThreadId, uploadFile, UserTokenMissingError } from '../im/lark/client.js';
+import { deleteMessage, sendMessage, sendUserMessage, replyMessage, listChatBotMembers, resolveUserUnionId, resolveUserEmailPrefix, getChatModeStrict, getMessageThreadId, uploadFile, UserTokenMissingError } from '../im/lark/client.js';
 import { chatAppLink, threadAppLink, normalizeBrand } from '../im/lark/lark-hosts.js';
 import { claimPairing } from '../services/pairing-store.js';
 import { logger } from '../utils/logger.js';
@@ -1918,9 +1918,11 @@ export async function handleCommand(
             let creation;
             try {
               const slug = branchArg ? undefined : await worktreeSlugFromContextAI(ds!.session.title, ds!.pendingPrompt);
+              const senderPrefix = await resolveUserEmailPrefix(larkAppId!, message.senderId).catch(() => undefined);
               creation = await createRepoWorktree(repoPath, {
                 branch: branchArg,
                 slug,
+                userPrefix: senderPrefix,
               });
             } catch (e) {
               await sessionReply(rootId, t('cmd.repo.worktree_failed', { error: e instanceof Error ? e.message : String(e) }, loc));

@@ -1,7 +1,7 @@
 /**
  * Git worktree creation for repo selection — "pick a repo, open it as a
  * fresh worktree". Creates a linked worktree next to the repo, branched off
- * the remote default branch (origin/master / origin/main), so each session
+ * the remote default branch (origin/rc/develop / origin/master / origin/main), so each session
  * can get an isolated checkout without touching the main one.
  *
  * Async (execFile) on purpose: a `git fetch` can take many seconds and this
@@ -28,8 +28,10 @@ export interface WorktreeCreation {
 export interface CreateRepoWorktreeOptions {
   /** Explicit branch to check out/create. Takes precedence over `slug`. */
   branch?: string;
-  /** Semantic auto-name seed; creates `wt/<slug>` and dir `<repo>-wt-<slug>`. */
+  /** Semantic auto-name seed; creates `p/<userPrefix>/<slug>` (defaults to `p/jiangwei.sooglejay/<slug>`) and dir `<repo>-<prefix>-<slug>`. */
   slug?: string;
+  /** Feishu user email prefix (before @); creates `p/<userPrefix>/<slug>` branch. */
+  userPrefix?: string;
   /** Explicit target directory. Used by multi-repo worktree groups. */
   worktreePath?: string;
 }
@@ -60,13 +62,14 @@ async function remoteBranchExists(repo: string, branch: string): Promise<boolean
   return (await tryGit(['rev-parse', '--verify', '--quiet', `refs/remotes/origin/${branch}`], repo)) !== null;
 }
 
-/** The remote default branch (`origin/master` / `origin/main`), or `HEAD`
- *  for repos without a usable remote. `origin/HEAD` is only set on clone, so
- *  fall through to probing the usual names when it's missing. */
+/** The remote default branch (`origin/rc/develop`), falling back to
+ *  `origin/master` / `origin/main`, or `HEAD` for repos without a usable
+ *  remote. `origin/HEAD` is only set on clone, so fall through to probing
+ *  the usual names when it's missing. */
 async function resolveBaseRef(repo: string): Promise<string> {
   const originHead = await tryGit(['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'], repo);
   if (originHead) return originHead;
-  for (const cand of ['origin/master', 'origin/main']) {
+  for (const cand of ['origin/rc/develop', 'origin/master', 'origin/main']) {
     if ((await tryGit(['rev-parse', '--verify', '--quiet', cand], repo)) !== null) return cand;
   }
   return 'HEAD';
@@ -87,14 +90,18 @@ export function dirSuffixForBranch(branch: string): string {
 
 /**
  * Build a git/filesystem-safe semantic slug from a session title or the first
- * prompt. Keep it ASCII so branch and directory names are portable. When the
- * source text has no latin/digit tokens (for example, all-CJK text), return
- * `undefined` so the caller falls back to the sequential `wt/N` naming rather
- * than an opaque hash.
+ * prompt. When the text contains a Meego requirement link (e.g.
+ * `https://meego.larkoffice.com/aweme/story/detail/6835710038`), extract the
+ * numeric ID as the slug. Otherwise, generate a latin slug from the text.
+ * Returns `undefined` when no latin/digit tokens are found (e.g. all-CJK text
+ * without a Meego link), so the caller falls back to sequential naming.
  */
 export function slugFromWorktreeText(text: string | undefined | null): string | undefined {
   const raw = text?.trim();
   if (!raw) return undefined;
+  // Prefer a Meego story/detail numeric ID as the slug — short, stable, unique.
+  const meegoMatch = raw.match(/meego\.larkoffice\.com\/[^\/]+\/story\/detail\/(\d+)/);
+  if (meegoMatch) return meegoMatch[1]!;
   const slug = raw
     .normalize('NFKD')
     .replace(/[\u0300-\u036f]/g, '')
@@ -120,10 +127,10 @@ async function resolveMainWorktree(dir: string): Promise<string> {
  * Create a linked worktree for `repoPath`, as a sibling of the repo's MAIN
  * checkout (a linked-worktree input is resolved back to the main one first).
  *
- * - No `branch` given, `slug` yields a latin slug → auto-pick `wt/<slug>`
- *   (or `-2` etc.), dir `<repo>-wt-<slug>`.
+ * - No `branch` given, `slug` yields a latin slug → auto-pick `p/<userPrefix>/<slug>`
+ *   (or `-2` etc.), dir `<repo>-<prefix>-<slug>`. Defaults to `p/jiangwei.sooglejay/<slug>` when no `userPrefix`.
  * - No `branch`/`slug` (or a `slug` with no latin/digit tokens, e.g. all-CJK)
- *   → auto-pick `wt/N` (first free N), dir `<repo>-wt-N`.
+ *   → auto-pick `p/<userPrefix>/N` (first free N), dir `<repo>-<prefix>-N`. Defaults to `p/jiangwei.sooglejay/N` when no `userPrefix`.
  * - `branch` given and exists locally → check it out into the worktree.
  * - `branch` given and exists remotely → create a local tracking branch from it.
  * - `branch` given and new → create it from the remote default branch.
@@ -156,18 +163,22 @@ export async function createRepoWorktree(
   let wtPath: string;
   const explicitPath = opts.worktreePath ? resolve(opts.worktreePath) : undefined;
   // Sanitize the auto-name seed up front: a slug with no latin/digit tokens
-  // (e.g. all-CJK) collapses to nothing → fall through to the `wt/N` path
+  // (e.g. all-CJK) collapses to nothing → fall through to the `p/<userPrefix>/N` path
   // rather than throwing or emitting an opaque hash.
   const slug = branch ? undefined : slugFromWorktreeText(opts.slug);
+  // Branch prefix: `p/<userPrefix>` — always use userPrefix (defaults to `jiangwei.sooglejay`).
+  // Sanitize to ascii-safe so the branch name is portable.
+  const userPrefix = opts.userPrefix?.trim().toLowerCase().replace(/[^a-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'jiangwei.sooglejay';
+  const branchPrefix = `p/${userPrefix}`;
   if (branch) {
     wtPath = explicitPath ?? join(parent, `${repoBase}-${dirSuffixForBranch(branch)}`);
     if (existsSync(wtPath)) throw new Error(`worktree target already exists: ${wtPath}`);
   } else if (slug) {
     if (explicitPath) {
       for (let n = 1;; n++) {
-        if (n > 1000) throw new Error(`no free wt/${slug} slot under 1000`);
+        if (n > 1000) throw new Error(`no free ${branchPrefix}/${slug} slot under 1000`);
         const candidateSlug = n === 1 ? slug : `${slug}-${n}`;
-        const candidateBranch = `wt/${candidateSlug}`;
+        const candidateBranch = `${branchPrefix}/${candidateSlug}`;
         if ((await localBranchExists(repo, candidateBranch)) ||
           (await remoteBranchExists(repo, candidateBranch))) continue;
         branch = candidateBranch;
@@ -177,9 +188,9 @@ export async function createRepoWorktree(
       if (existsSync(wtPath)) throw new Error(`worktree target already exists: ${wtPath}`);
     } else {
       for (let n = 1;; n++) {
-        if (n > 1000) throw new Error(`no free wt/${slug} slot under 1000`);
+        if (n > 1000) throw new Error(`no free ${branchPrefix}/${slug} slot under 1000`);
         const candidateSlug = n === 1 ? slug : `${slug}-${n}`;
-        const candidateBranch = `wt/${candidateSlug}`;
+        const candidateBranch = `${branchPrefix}/${candidateSlug}`;
         const candPath = join(parent, `${repoBase}-${dirSuffixForBranch(candidateBranch)}`);
         if (existsSync(candPath) ||
           (await localBranchExists(repo, candidateBranch)) ||
@@ -193,9 +204,9 @@ export async function createRepoWorktree(
     if (explicitPath) {
       let n = 1;
       for (;; n++) {
-        if (n > 1000) throw new Error('no free wt/N slot under 1000');
-        if (await localBranchExists(repo, `wt/${n}`)) continue;
-        branch = `wt/${n}`;
+        if (n > 1000) throw new Error(`no free ${branchPrefix}/N slot under 1000`);
+        if (await localBranchExists(repo, `${branchPrefix}/${n}`)) continue;
+        branch = `${branchPrefix}/${n}`;
         wtPath = explicitPath;
         break;
       }
@@ -203,10 +214,10 @@ export async function createRepoWorktree(
     } else {
       let n = 1;
       for (;; n++) {
-        if (n > 1000) throw new Error('no free wt/N slot under 1000');
-        const candPath = join(parent, `${repoBase}-wt-${n}`);
-        if (existsSync(candPath) || (await localBranchExists(repo, `wt/${n}`))) continue;
-        branch = `wt/${n}`;
+        if (n > 1000) throw new Error(`no free ${branchPrefix}/N slot under 1000`);
+        const candPath = join(parent, `${repoBase}-${dirSuffixForBranch(branchPrefix)}-${n}`);
+        if (existsSync(candPath) || (await localBranchExists(repo, `${branchPrefix}/${n}`))) continue;
+        branch = `${branchPrefix}/${n}`;
         wtPath = candPath;
         break;
       }
