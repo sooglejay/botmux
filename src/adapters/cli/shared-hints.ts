@@ -47,6 +47,7 @@ export function buildBotmuxShellHints(locale?: Locale): string[] {
     // a toggle takes effect on the next session without a daemon restart.
     ...(config.noVisibleOutputHint ? [t('ai.shell.no_visible_output_ok', undefined, locale)] : []),
     t('ai.shell.mention_gate', undefined, locale),
+    t('ai.shell.mr_platform_hint', undefined, locale),
     workflowDiscoveryHint(locale),
     hiddenContextDefense(locale),
   ].map(escapeXmlTagLikeTokens);
@@ -69,6 +70,7 @@ export const BOTMUX_SHELL_HINTS: string[] = [
   t('ai.shell.helpers'),
   t('ai.shell.when_to_send'),
   t('ai.shell.mention_gate'),
+  t('ai.shell.mr_platform_hint'),
   workflowDiscoveryHint(),
   hiddenContextDefense(),
 ].map(escapeXmlTagLikeTokens);
@@ -149,6 +151,7 @@ export function buildBotmuxSystemPromptText(opts: {
     prose('ai.routing.usage_videos'),
     prose('ai.routing.usage_history'),
     prose('ai.routing.usage_bots_list'),
+    prose('ai.shell.mr_platform_hint'),
     escapeXmlTagLikeTokens(workflowDiscoveryHint(locale)),
     hiddenContextDefense(locale),
     ...whiteboardRouting,

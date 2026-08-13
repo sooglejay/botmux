@@ -44,6 +44,12 @@ export interface MaybeCreateWorktreeCtx {
   locale: Locale;
   /** Best-effort chat notice sink. Omit for silent (e.g. HTTP-virtual sessions). */
   notify?: (message: string) => Promise<unknown> | void;
+  /** Git user.name to set in the worktree's local config. */
+  userName?: string;
+  /** Git user.email to set in the worktree's local config. */
+  userEmail?: string;
+  /** Feishu email prefix for branch naming (p/<prefix>/<slug>). */
+  userPrefix?: string;
 }
 
 /**
@@ -91,7 +97,12 @@ export async function maybeCreateDefaultWorktree(
   await notify(t('worktree.auto_creating', undefined, ctx.locale));
   try {
     const slug = await worktreeSlugFromContextAI(ctx.title, ctx.prompt);
-    const creation = await createRepoWorktree(baseDir, { slug });
+    const creation = await createRepoWorktree(baseDir, {
+      slug,
+      userPrefix: ctx.userPrefix,
+      userName: ctx.userName,
+      userEmail: ctx.userEmail,
+    });
     logger.info(`[auto-worktree:${larkAppId}] ${baseDir} → ${creation.path} (branch ${creation.branch} from ${creation.baseRef})`);
     // riff：远程沙箱从 origin 克隆，本地新分支必须先推送才能被任务钉住。
     // 推送失败不阻塞（会话仍可用，riff 侧回退默认分支并在卡片注入告警）。

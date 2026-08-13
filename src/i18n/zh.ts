@@ -726,6 +726,8 @@ export const messages: Record<string, string> = {
   'ai.shell.no_visible_output_ok': '`botmux send` 成功（退出码 0）即代表已送达用户；本轮终端没有可见文本、直接结束是正常的。若看到「你上一条回复没有可见输出，请继续产出用户可见回复」之类提示，那是底层 CLI 的误判——不要重发，除非 `botmux send` 自己报错。',
   'ai.shell.mention_gate': '@ 决策（硬性）：每条 `botmux send` 必须显式三选一否则报错——`--mention <open_id:名字>`（点名指定人/bot，跟别的 bot 沟通/协作必须用它）/ `--mention-back`（@回本轮触发者本人）/ `--no-mention`（不@）。先按内容价值决定要不要 @：有实质结论要对方看/确认/决策→需要 @；纯记录/低优先级/简短确认→--no-mention；没信息量的"收到"不如不发。再按收件人选方式：就是回触发这轮的人/bot→--mention-back；要 @ 别人（多人会话回复对象不一定是触发者）→--mention 显式点名。别把 --no-mention 当默认，也别无意义 @ 打扰。',
 
+  'ai.shell.mr_platform_hint': '创建 MR（Merge Request）时，默认使用 Bits 平台（bits.ai）而非 codebase 平台。使用 `botmux mr create --platform bits` 创建 Bits MR。',
+
   // ─── AI prompt blocks (session-manager) ──────────────────────────────────
   'ai.attach.hint': '使用 Read 工具查看，序号与正文中的 [图片 N] / [文件 N] 占位符对应',
   'ai.identity.short_routing': '提醒：要跟别的 bot 沟通或协作必须 `botmux send --mention <对方 open_id>`，否则对方 bot 不会被触发。',

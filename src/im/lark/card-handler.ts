@@ -8,7 +8,7 @@ import { basename as pathBasename, dirname, join } from 'node:path';
 import { config } from '../../config.js';
 import { getBot, getAllBots, getOwnerOpenId } from '../../bot-registry.js';
 import { canOperate, canTalk } from './event-dispatcher.js';
-import { updateMessage, deleteMessage, replyMessage, sendMessage, sendUserMessage, sendEphemeralCard, getMessageDetail, isHumanOpenId, resolveUserUnionId as defaultResolveUserUnionId, resolveUserEmailPrefix } from './client.js';
+import { updateMessage, deleteMessage, replyMessage, sendMessage, sendUserMessage, sendEphemeralCard, getMessageDetail, isHumanOpenId, resolveUserUnionId as defaultResolveUserUnionId, resolveUserEmailPrefix, resolveUserGitIdentity } from './client.js';
 import { buildSessionCard, buildStreamingCard, buildTuiPromptCard, buildTuiPromptProcessingCard, buildGrantResultCard, getCliDisplayName, truncateContent, buildConfigCard, buildConfigQuotaCard, buildConfigTextCard, CONFIG_UNSET, buildRepoSelectCard } from './card-builder.js';
 import { codexServiceTierBadge } from '../../services/codex-service-tier.js';
 import {
@@ -825,8 +825,15 @@ export async function runAutoWorktreeCommit(deps: {
   announcePendingRepoSession(ds);
   try {
     const { maybeCreateDefaultWorktree } = await import('../../services/default-worktree.js');
+    const [senderPrefix, gitIdentity] = await Promise.all([
+      operatorOpenId ? resolveUserEmailPrefix(larkAppId, operatorOpenId).catch(() => undefined) : undefined,
+      operatorOpenId ? resolveUserGitIdentity(larkAppId, operatorOpenId).catch(() => ({}) as { name?: string; email?: string }) : {} as { name?: string; email?: string },
+    ]);
     const wt = await maybeCreateDefaultWorktree(larkAppId, baseDir, {
       isBotDefaultDir: true, title, prompt, locale: localeForBot(larkAppId), notify,
+      userPrefix: senderPrefix,
+      userName: gitIdentity.name,
+      userEmail: gitIdentity.email,
     });
     // The pendingRepo placeholder can legitimately be consumed WHILE this
     // up-to-30s build runs — e.g. the Codex-notifier「继续处理」callback adopts
@@ -3466,12 +3473,17 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
         try {
           const branch = action?.value?.branch?.trim() || undefined;
           const slug = branch ? undefined : await worktreeSlugFromContextAI(targetDs.session.title, targetDs.pendingPrompt);
-          const cardUserPrefix = operatorOpenId ? await resolveUserEmailPrefix(larkAppId!, operatorOpenId).catch(() => undefined) : undefined;
+          const [cardUserPrefix, cardGitIdentity] = operatorOpenId ? await Promise.all([
+            resolveUserEmailPrefix(larkAppId!, operatorOpenId).catch(() => undefined),
+            resolveUserGitIdentity(larkAppId!, operatorOpenId).catch(() => ({}) as { name?: string; email?: string }),
+          ]) : [undefined, {}];
           for (const repoPath of selectedWorktreePaths) {
             const result = await createRepoWorktree(repoPath, {
               branch,
               slug,
               userPrefix: cardUserPrefix,
+              userName: cardGitIdentity.name,
+              userEmail: cardGitIdentity.email,
               worktreePath: selectedWorktreePaths.length > 1 && parentPath
                 ? join(parentPath, worktreeChildNameForRepo(repoPath, cached))
                 : undefined,

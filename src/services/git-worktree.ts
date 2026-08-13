@@ -32,6 +32,11 @@ export interface CreateRepoWorktreeOptions {
   slug?: string;
   /** Feishu user email prefix (before @); creates `p/<userPrefix>/<slug>` branch. */
   userPrefix?: string;
+  /** Git user.name to set in the worktree's local config (so the bot user's
+   *  commits carry the right author identity). */
+  userName?: string;
+  /** Git user.email to set in the worktree's local config. */
+  userEmail?: string;
   /** Explicit target directory. Used by multi-repo worktree groups. */
   worktreePath?: string;
 }
@@ -230,6 +235,7 @@ export async function createRepoWorktree(
     // Existing branch: check it out as-is (git rejects it if the branch is
     // already checked out in another worktree — surface that error verbatim).
     await git(['worktree', 'add', wtPath, branch], repo, 60_000);
+    await setWorktreeGitIdentity(wtPath, opts);
     logger.info(`[git-worktree] created ${wtPath} on existing branch ${branch}`);
     return { path: wtPath, branch, baseRef: branch };
   }
@@ -244,12 +250,14 @@ export async function createRepoWorktree(
     const remoteRef = `origin/${branch}`;
     if (await remoteBranchExists(repo, branch)) {
       await git(['worktree', 'add', '-b', branch, '--track', wtPath, remoteRef], repo, 60_000);
+      await setWorktreeGitIdentity(wtPath, opts);
       logger.info(`[git-worktree] created ${wtPath} tracking ${remoteRef}`);
       return { path: wtPath, branch, baseRef: remoteRef };
     }
   }
 
   await git(['worktree', 'add', '-b', branch, wtPath, baseRef], repo, 60_000);
+  await setWorktreeGitIdentity(wtPath, opts);
   logger.info(`[git-worktree] created ${wtPath} (branch ${branch} from ${baseRef})`);
   return { path: wtPath, branch, baseRef };
 }
@@ -264,6 +272,29 @@ export async function createRepoWorktree(
 export async function pushWorktreeBranch(worktreePath: string, branch: string): Promise<void> {
   await git(['push', '-u', 'origin', branch], resolve(worktreePath), 60_000);
   logger.info(`[git-worktree] pushed branch ${branch} to origin (${worktreePath})`);
+}
+
+/**
+ * Set the worktree's local git user.name and user.email from the creation
+ * options, so commits made in the worktree carry the initiating user's
+ * identity. Best-effort: a missing config binary or write failure is logged
+ * but never propagated.
+ */
+async function setWorktreeGitIdentity(wtPath: string, opts: CreateRepoWorktreeOptions): Promise<void> {
+  if (!opts.userName && !opts.userEmail) return;
+  try {
+    const args: string[] = [];
+    if (opts.userName) args.push('-c', `user.name=${opts.userName}`);
+    if (opts.userEmail) args.push('-c', `user.email=${opts.userEmail}`);
+    // Use `git -c key=val config --local ...` to set the identity in the
+    // worktree's .git/config. The -c flags are consumed by the outer git
+    // invocation and don't persist — we need separate config calls.
+    if (opts.userName) await git(['config', '--local', 'user.name', opts.userName], wtPath, 5_000);
+    if (opts.userEmail) await git(['config', '--local', 'user.email', opts.userEmail], wtPath, 5_000);
+    logger.info(`[git-worktree] set git identity in ${wtPath}: name=${opts.userName ?? '(unchanged)'} email=${opts.userEmail ?? '(unchanged)'}`);
+  } catch (e) {
+    logger.warn(`[git-worktree] failed to set git identity in ${wtPath}: ${e instanceof Error ? e.message : e}`);
+  }
 }
 
 /** Remove a worktree created by {@link createRepoWorktree}. Used to roll back the

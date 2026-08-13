@@ -1491,6 +1491,30 @@ export async function resolveUserEmailPrefix(larkAppId: string, openId: string):
   return undefined;
 }
 
+/**
+ * Resolve a Feishu user's git identity (name + email) from their open_id.
+ * Both fields are derived from the Contact API's user object. Returns
+ * `undefined` for fields that cannot be resolved.
+ */
+export async function resolveUserGitIdentity(
+  larkAppId: string, openId: string,
+): Promise<{ name?: string; email?: string }> {
+  if (!openId) return {};
+  try {
+    const c = getBotClient(larkAppId);
+    const res = await larkGet(c, `/open-apis/contact/v3/users/${encodeURIComponent(openId)}`, { user_id_type: 'open_id' });
+    if (res.code === 0 && res.data?.user) {
+      const u = res.data.user;
+      const email: string | undefined = u.email ?? u.enterprise_email;
+      return { name: u.name ?? undefined, email: email ?? undefined };
+    }
+    logger.debug(`[resolveUserGitIdentity] no user data for ${openId.substring(0, 12)}`);
+  } catch (err: any) {
+    logger.debug(`[resolveUserGitIdentity] failed for ${openId.substring(0, 12)}: ${err?.message ?? err}`);
+  }
+  return {};
+}
+
 export async function resolveAllowedUsers(larkAppId: string, raw: string[]): Promise<string[]> {
   return (await resolveAllowedUsersWithMap(larkAppId, raw)).resolved;
 }
