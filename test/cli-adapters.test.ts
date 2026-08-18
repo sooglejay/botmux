@@ -49,6 +49,7 @@ import { createKimiAdapter } from '../src/adapters/cli/kimi.js';
 import { createGrokAdapter } from '../src/adapters/cli/grok.js';
 import { createKiroCliAdapter } from '../src/adapters/cli/kiro-cli.js';
 import { createReasonixAdapter } from '../src/adapters/cli/reasonix.js';
+import { createDshAdapter } from '../src/adapters/cli/dsh.js';
 import { buildBotmuxShellHints, buildBotmuxSystemPromptText } from '../src/adapters/cli/shared-hints.js';
 import type { CliAdapter, CliId, PtyHandle } from '../src/adapters/cli/types.js';
 
@@ -56,7 +57,7 @@ import type { CliAdapter, CliId, PtyHandle } from '../src/adapters/cli/types.js'
 // Helpers
 // ---------------------------------------------------------------------------
 
-const ALL_CLI_IDS: CliId[] = ['claude-code', 'seed', 'aiden', 'coco', 'codex', 'codex-app', 'gemini', 'genius', 'opencode', 'antigravity', 'mtr', 'hermes', 'mira', 'mir', 'traex', 'pi', 'copilot', 'oh-my-pi', 'kimi', 'grok', 'kiro-cli', 'reasonix'];
+const ALL_CLI_IDS: CliId[] = ['claude-code', 'seed', 'aiden', 'coco', 'codex', 'codex-app', 'gemini', 'genius', 'opencode', 'opencode2', 'antigravity', 'mtr', 'hermes', 'mira', 'mir', 'traex', 'pi', 'copilot', 'oh-my-pi', 'kimi', 'grok', 'kiro-cli', 'reasonix', 'dsh'];
 
 // ---------------------------------------------------------------------------
 // 1. Factory: createCliAdapterSync
@@ -80,7 +81,7 @@ describe('createCliAdapterSync factory', () => {
 
   it.each(ALL_CLI_IDS)('adapter for "%s" has resolvedBin set', (id) => {
     const adapter = createCliAdapterSync(id, `/opt/${id}`);
-    if (id === 'codex-app' || id === 'mira' || id === 'mir') expect(adapter.resolvedBin).toBe(process.execPath);
+    if (id === 'codex-app' || id === 'mira' || id === 'mir' || id === 'dsh') expect(adapter.resolvedBin).toBe(process.execPath);
     else expect(adapter.resolvedBin).toBe(`/opt/${id}`);
   });
 });
@@ -96,7 +97,7 @@ describe('lazy binary resolution', () => {
   // Direct CLI adapters resolve their actual executable lazily. Runner-backed
   // adapters (codex-app/mira) intentionally use process.execPath and are covered
   // by their own buildArgs tests below.
-  const DIRECT_CLI_IDS: CliId[] = ['claude-code', 'seed', 'aiden', 'coco', 'codex', 'cursor', 'gemini', 'genius', 'opencode', 'antigravity', 'mtr', 'hermes', 'traex', 'copilot', 'kimi', 'grok', 'kiro-cli', 'reasonix'];
+  const DIRECT_CLI_IDS: CliId[] = ['claude-code', 'seed', 'aiden', 'coco', 'codex', 'cursor', 'gemini', 'genius', 'opencode', 'opencode2', 'antigravity', 'mtr', 'hermes', 'traex', 'copilot', 'kimi', 'grok', 'kiro-cli', 'reasonix'];
 
   it.each(DIRECT_CLI_IDS)('"%s": construction does not probe; first resolvedBin read does', async (id) => {
     const { spawnSync } = await import('node:child_process');
@@ -228,6 +229,18 @@ describe('claude-code buildArgs', () => {
       expect(prompt).toContain('JSON-escaped text as a positional argument');
       expect(prompt).toContain('literal `\\n` back into newlines');
       expect(prompt).toContain('--content-file');
+    }
+  });
+
+  it('keeps the final-answer feedback hint aligned across both injection paths', () => {
+    // 回归守卫：feedbackResponseKindHint 必须同时出现在 system-prompt 路径
+    // （injectsSessionContext CLI）与 shell-hints 路径，否则启用最终回答反馈时
+    // 两类 CLI 的发送行为会静默分叉。
+    const systemPrompt = buildBotmuxSystemPromptText({ locale: 'en' });
+    const shellHints = buildBotmuxShellHints('en').join('\n');
+    for (const prompt of [systemPrompt, shellHints]) {
+      expect(prompt).toContain('--response-kind final');
+      expect(prompt).toContain('feedback buttons');
     }
   });
 
@@ -551,6 +564,87 @@ describe('mira buildArgs', () => {
   });
 });
 
+describe('dsh buildArgs (runner model)', () => {
+  const adapter = createDshAdapter('/opt/dsh/bin/dsh-jsonrpc-agent');
+
+  it('spawns the node runner and passes the dsh runtime binary', () => {
+    const args = adapter.buildArgs({ sessionId: 'sess-dsh', resume: false, workingDir: '/repo/root' });
+    expect(adapter.resolvedBin).toBe(process.execPath);
+    expect(args[0]).toMatch(/dsh-runner\.js$/);
+    expect(args).toContain('--session-id');
+    expect(args).toContain('sess-dsh');
+    expect(args).toContain('--dsh-bin');
+    expect(args).toContain('/opt/dsh/bin/dsh-jsonrpc-agent');
+    expect(args).toContain('--cwd');
+    expect(args).toContain('/repo/root');
+  });
+
+  it('forwards bot identity, locale and model to the runner', () => {
+    const args = adapter.buildArgs({
+      sessionId: 's', resume: false, botName: 'Monday', botOpenId: 'ou_x', locale: 'zh', model: 'deepseek-v4-pro',
+    });
+    expect(args).toContain('--bot-name');
+    expect(args).toContain('Monday');
+    expect(args).toContain('--bot-open-id');
+    expect(args).toContain('ou_x');
+    expect(args).toContain('--locale');
+    expect(args).toContain('zh');
+    expect(args).toContain('--model');
+    expect(args).toContain('deepseek-v4-pro');
+  });
+
+  it('omits --model when no model is configured', () => {
+    const args = adapter.buildArgs({ sessionId: 's', resume: false });
+    expect(args).not.toContain('--model');
+  });
+
+  it('forwards a per-bot turn timeout to the runner', () => {
+    const args = adapter.buildArgs({ sessionId: 's', resume: false, turnTimeoutMs: 30 * 60 * 1000 });
+    expect(args).toContain('--turn-timeout-ms');
+    expect(args).toContain(String(30 * 60 * 1000));
+  });
+
+  it('omits --turn-timeout-ms when unset or non-positive', () => {
+    expect(adapter.buildArgs({ sessionId: 's', resume: false })).not.toContain('--turn-timeout-ms');
+    expect(adapter.buildArgs({ sessionId: 's', resume: false, turnTimeoutMs: 0 })).not.toContain('--turn-timeout-ms');
+    expect(adapter.buildArgs({ sessionId: 's', resume: false, turnTimeoutMs: -5 })).not.toContain('--turn-timeout-ms');
+  });
+
+  it('has no portable copy-paste resume command', () => {
+    expect(adapter.buildResumeCommand?.({ sessionId: 'sess-dsh', cliSessionId: 'session-abc' })).toBeNull();
+  });
+
+  it('readyPattern matches the runner prompt indicator', () => {
+    expect(adapter.readyPattern?.test('› ')).toBe(true);
+  });
+
+  it('defers the first prompt until the runner is ready (slow handshake)', () => {
+    expect(adapter.deferFirstPromptTimeoutUntilReady).toBe(true);
+  });
+
+  it('does not type ahead (serial turns)', () => {
+    expect(adapter.supportsTypeAhead).not.toBe(true);
+  });
+
+  it('advertises the deepseek model choices', () => {
+    expect(adapter.modelChoices).toEqual(['deepseek-v4-flash', 'deepseek-v4-pro']);
+  });
+
+  it('writeInput frames content with the dsh marker', async () => {
+    const written: string[] = [];
+    const pty = {
+      write: (data: string) => { written.push(data); return true; },
+    } as unknown as PtyHandle;
+    const result = await adapter.writeInput!(pty, 'hello dsh', { turnId: 'turn-1' });
+    expect(result).toEqual({ submitted: true, submissionDisposition: 'submitted' });
+    const line = written.join('');
+    expect(line.startsWith('::botmux-dsh:')).toBe(true);
+    const decoded = JSON.parse(Buffer.from(line.slice('::botmux-dsh:'.length).trim(), 'base64').toString('utf8'));
+    expect(decoded.content).toBe('hello dsh');
+    expect(decoded.replyTurnId).toBe('turn-1');
+  });
+});
+
 describe('mir buildArgs (runner model)', () => {
   const adapter = createMirAdapter();
 
@@ -657,8 +751,9 @@ describe('copilot buildArgs', () => {
 describe('cursor buildArgs', () => {
   const adapter = createCursorAdapter('/usr/bin/cursor-agent');
 
-  it('fresh session passes force/model flags without resume flags', () => {
+  it('fresh session passes trust/force/model flags without resume flags', () => {
     const args = adapter.buildArgs({ sessionId: 'sess-cursor', resume: false, model: 'gpt-5' });
+    expect(args).toContain('--trust');
     expect(args).toContain('--force');
     expect(args).toContain('--model');
     expect(args).toContain('gpt-5');
@@ -673,6 +768,7 @@ describe('cursor buildArgs', () => {
       resume: true,
       resumeSessionId: chatId,
     });
+    expect(args).toContain('--trust');
     expect(args).toContain('--resume');
     const idx = args.indexOf('--resume');
     expect(args[idx + 1]).toBe(chatId);
@@ -681,8 +777,19 @@ describe('cursor buildArgs', () => {
 
   it('resume without a persisted chatId falls back to --continue', () => {
     const args = adapter.buildArgs({ sessionId: 'sess-cursor', resume: true });
+    expect(args).toContain('--trust');
     expect(args).toContain('--continue');
     expect(args).not.toContain('--resume');
+  });
+
+  // The workspace-trust dialog is a startup gate, not an approval flow: a
+  // headless spawn can never answer it, and the injected first prompt would
+  // answer it by accident (`a` trusts, `q` quits). So --trust must survive
+  // disableCliBypass while --force is dropped.
+  it('disableCliBypass drops --force but keeps --trust', () => {
+    const args = adapter.buildArgs({ sessionId: 'sess-cursor', resume: false, disableCliBypass: true });
+    expect(args).toContain('--trust');
+    expect(args).not.toContain('--force');
   });
 });
 
@@ -804,6 +911,15 @@ describe('opencode buildArgs', () => {
 
   it('passesInitialPromptViaArgs is true', () => {
     expect(adapter.passesInitialPromptViaArgs).toBe(true);
+  });
+
+  it('exposes paste-line raw command delivery capability', () => {
+    const rawAdapter = createOpenCodeAdapter('/bin/opencode');
+
+    expect(rawAdapter.rawCommandInputMode).toBe('paste-line');
+    expect(rawAdapter.rawCommandSettleMs).toEqual(expect.any(Number));
+    expect(Number.isFinite(rawAdapter.rawCommandSettleMs)).toBe(true);
+    expect(rawAdapter.rawCommandSettleMs).toBeGreaterThan(0);
   });
 
   it('does not include session id or resume', () => {
@@ -1357,8 +1473,18 @@ describe('idleToBusyPattern', () => {
     expect(busy!.test('Working through the implementation')).toBe(false);
   });
 
+  it('pi opts in with the same Working... marker as its busyPattern', () => {
+    // Pi's `Working...` is an ephemeral status line (never part of transcript
+    // history redraws), so idle→busy recovery is safe: a falsely published
+    // ready self-heals when the marker renders again.
+    const adapter = createPiAdapter('/bin/pi');
+    expect(adapter.idleToBusyPattern).toBeDefined();
+    expect(adapter.idleToBusyPattern!.source).toBe(adapter.busyPattern!.source);
+    expect(adapter.idleToBusyPattern!.test('● Working... (esc to interrupt)')).toBe(true);
+    expect(adapter.idleToBusyPattern!.test('Working through the implementation')).toBe(false);
+  });
+
   it.each([
-    ['pi', createPiAdapter('/bin/pi')],
     ['genius', createGeniusAdapter('/bin/genius')],
     ['grok', createGrokAdapter('/bin/grok')],
   ])('%s keeps legacy busyPattern semantics and does not opt in', (_name, adapter) => {

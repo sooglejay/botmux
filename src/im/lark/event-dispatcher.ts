@@ -71,6 +71,7 @@ import {
 import type { VcMeetingPushContext, VcMeetingPushEventKind } from '../../vc-agent/types.js';
 import type { VcMeetingImTurnOrigin } from '../../types.js';
 import { DEFAULT_GRANT_DURATION_MS, DEFAULT_GRANT_QUOTA } from '../../services/grant-policy.js';
+import { readPeerCrossRef, writePeerCrossRef } from '../../services/peer-cross-ref-store.js';
 
 // 大厅回执互教的防环闸：每进程对同一打卡者只回一次（见 hall swallow 分支）。
 const hallEchoReplied = new Set<string>();
@@ -687,6 +688,11 @@ function cardActionKey(larkAppId: string, data: any): string {
     messageId: cardActionMessageId(data),
     operator: data?.operator?.open_id,
     action: value?.action ?? action?.option ?? action?.tag,
+    // Feedback primary/reason buttons share an action name. Include their
+    // semantic target so a rapid change of choice is not mistaken for a
+    // duplicate in-flight click on the previous button.
+    feedbackResult: value?.result,
+    feedbackReason: value?.reason_key,
     rootId: value?.root_id,
     sessionId: value?.session_id,
     // Detail actions can share action labels across rows; include row ids so
@@ -714,6 +720,11 @@ function cardActionKey(larkAppId: string, data: any): string {
     // managing bot A in group X doesn't dedupe bot B in group Y.
     chatId: value?.chat_id,
     appId: value?.app_id,
+    // Overload browser-restart buttons all share one action label
+    // (`overload_restart_browser`) but target different browsers; include the
+    // bundleId so rapidly clicking Arc then Chrome isn't collapsed into one
+    // in-flight dedupe key that drops the second click.
+    bundleId: value?.bundleId,
   })}`;
 }
 
@@ -721,7 +732,7 @@ function shapeCardActionResult(result: any): any {
   // The handler may return:
   //   - an already-shaped Lark response ({toast} and/or {card}) -> pass through;
   //   - a raw card body (e.g. toggle_stream) -> wrap as an in-place card patch.
-  if (result && (result.toast || result.card)) return result;
+  if (result && (result.toast || result.card || result.deferredCard)) return result;
   if (result) return { card: { type: 'raw', data: result } };
   // The Lark WS SDK only serializes callback `data` for truthy results. An
   // empty object therefore means "ACK with no UI update", while undefined
@@ -736,8 +747,8 @@ function serializeRawCardForPatch(cardData: any): string | undefined {
 
 async function patchTimedOutCardActionResult(larkAppId: string, data: any, shapedResult: any): Promise<void> {
   const messageId = cardActionMessageId(data);
-  if (!messageId || !shapedResult?.card) return;
-  const card = shapedResult.card;
+  const card = shapedResult?.card ?? shapedResult?.deferredCard;
+  if (!messageId || !card) return;
   const raw = card.type === 'raw' ? card.data : card;
   const body = serializeRawCardForPatch(raw);
   if (!body) return;
@@ -769,6 +780,17 @@ async function handleCardActionAckSafe(data: any, larkAppId: string, handlers: E
   let timedOut = false;
   const work = handlers.handleCardAction(data, larkAppId)
     .then(shapeCardActionResult)
+    .then(result => {
+      if (!result?.deferredCard) return result;
+      // ACK the callback before patching. If we await message.patch here, Lark
+      // applies the callback completion after the API patch and can restore the
+      // pre-click card, making the expanded follow-up flash and disappear.
+      setTimeout(() => {
+        void patchTimedOutCardActionResult(larkAppId, data, result)
+          .catch(err => logger.warn(`Failed to patch deferred card action result: ${err}`));
+      }, 0);
+      return {};
+    })
     .catch(err => {
       logger.error(`Error handling card action: ${err}`);
       return {};
@@ -862,15 +884,9 @@ export function __resetChatStatsForTest(): void {
 /** Read the per-bot cross-reference: botName(lowercase) → openId as seen by larkAppId's app */
 export function readBotOpenIdCrossRef(dataDir: string, larkAppId: string): Map<string, string> {
   const map = new Map<string, string>();
-  try {
-    const fp = join(dataDir, `bot-openids-${larkAppId}.json`);
-    if (existsSync(fp)) {
-      const data: Record<string, string> = JSON.parse(readFileSync(fp, 'utf-8'));
-      for (const [name, openId] of Object.entries(data)) {
-        map.set(name.toLowerCase(), openId);
-      }
-    }
-  } catch { /* ignore */ }
+  for (const [name, openId] of Object.entries(readPeerCrossRef(dataDir, larkAppId))) {
+    map.set(name.toLowerCase(), openId);
+  }
   return map;
 }
 
@@ -976,11 +992,7 @@ export function updateBotOpenIdCrossRef(
   if (knownBotNames.size === 0) return;
 
   // Read existing cross-reference
-  const fp = join(dataDir, `bot-openids-${larkAppId}.json`);
-  let existing: Record<string, string> = {};
-  try {
-    if (existsSync(fp)) existing = JSON.parse(readFileSync(fp, 'utf-8'));
-  } catch { /* ignore */ }
+  const existing: Record<string, string> = { ...readPeerCrossRef(dataDir, larkAppId) };
 
   // Update with new mentions that match known bot names
   let changed = false;
@@ -996,8 +1008,7 @@ export function updateBotOpenIdCrossRef(
 
   if (changed) {
     try {
-      if (!existsSync(dataDir)) mkdirSync(dataDir, { recursive: true });
-      atomicWriteFileSync(fp, JSON.stringify(existing, null, 2) + '\n');
+      writePeerCrossRef(dataDir, larkAppId, existing);
       logger.debug(`Updated bot open_id cross-ref for ${larkAppId}: ${JSON.stringify(existing)}`);
     } catch (err) {
       logger.debug(`Failed to write bot open_id cross-ref: ${err}`);
@@ -1769,7 +1780,23 @@ export interface RoutingContext {
   messageListener?: MessageListenerMatch;
   /** Earlier topic seed coalesced into this root-linked clarification. */
   forwardSeedData?: any;
+  /** Set by the session-group birth flow (p2pMode='group') after it has
+   *  re-homed this turn from a DM into a freshly-created session group —
+   *  prevents the birth logic from re-triggering on the rewritten context. */
+  sessionGroupBirth?: boolean;
+  /** Session-group birth only: the in-group intro message id used as the
+   *  turn's REPLY anchor (quote target / session rootMessageId), so the first
+   *  turn's outputs land in the group. `messageId` stays the ORIGINAL inbound
+   *  DM message id — resource downloads and merge-forward expansion must keep
+   *  using it (the resource keys belong to the source message, PR review P1). */
+  replyAnchorMessageId?: string;
   larkAppId: string;
+  /** 本轮 inbound 的接纳阶段标记，由 daemon 的普通消息入口初始化、各接纳点翻转。
+   *  必须是共享 mutable box 而非布尔字段：reroute 交接会浅拷贝 ctx
+   *  （`{ ...ctx, scope, anchor }`），box 引用随拷贝共享，接纳发生在拷贝之后
+   *  也能被最外层 ingress catch 看到。admitted 为 true 后该 catch 不得再提示
+   *  重发——本轮已进 durable queue / worker，重发会让同一任务再次入队执行。 */
+  ingressAdmission?: { admitted: boolean };
 }
 
 interface PendingForwardTopicPayload {
@@ -2313,16 +2340,21 @@ async function decideRoutingWithSource(
   // 下面的 real-thread（root_id+thread_id）分支判断 —— 否则用户在 DM 里"回复某条
   // 消息"形成的 thread 形态消息会被提前分流到 thread-scope，破坏"连续单聊会话"
   // 语义（典型触发：thread→chat 模式切换后回复旧 thread，或 Lark 给 DM 回复塞了
-  // thread_id）。p2pMode 默认 'chat'；只有显式 'thread' 才回到每条 DM 独立话题的
-  // 旧行为。群聊不受影响。
-  if (chatType === 'p2p' && getBot(larkAppId)?.config?.p2pMode !== 'thread') {
-    return { scope: 'chat', anchor: chatId, source: 'p2p' };
+  // thread_id）。p2pMode 默认 'chat'；显式 'thread' 回到每条 DM 独立话题的旧行为；
+  // 显式 'group'（会话群模式）与 thread 同形路由——每条顶层 DM 都是新锚点，随后由
+  // handleNewTopic 的会话群出生流程把会话改道进新建的专属群。群聊不受影响。
+  {
+    const p2pModeForRouting = getBot(larkAppId)?.config?.p2pMode;
+    if (chatType === 'p2p' && p2pModeForRouting !== 'thread' && p2pModeForRouting !== 'group') {
+      return { scope: 'chat', anchor: chatId, source: 'p2p' };
+    }
   }
 
   if (rootId && threadId) return { scope: 'thread', anchor: rootId, source: 'real-thread' };
 
-  // 私聊 thread 模式（显式 opt-out）：每条 top-level DM 都视为新话题 — 跟话题群
-  // 同款，匹配 Lark DM 的话题化行为，把 1:1 对话按消息拆成独立 CLI 进程。
+  // 私聊 thread / group 模式（显式 opt-out）：每条 top-level DM 都视为新话题 — 跟
+  // 话题群同款，匹配 Lark DM 的话题化行为，把 1:1 对话按消息拆成独立 CLI 进程
+  // （group 模式的改道发生在 handleNewTopic，路由形状与 thread 一致）。
   if (chatType === 'p2p') {
     return { scope: 'thread', anchor: messageId, source: 'p2p' };
   }

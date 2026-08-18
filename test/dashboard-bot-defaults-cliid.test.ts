@@ -140,6 +140,7 @@ describe('Codex-compatible runtime editor', () => {
   it('defaults old payloads to Official Codex and keeps wrapper or non-Codex selections unchanged', () => {
     const official = renderAgent({ cliId: 'codex' });
     expect(official.root.findByProps({ 'data-input': 'agentRuntimeMode' }).props.value).toBe('official');
+    expect(official.root.findByProps({ dataInput: 'agentReasoningEffort' }).props.value).toBe('');
     expect(official.root.findAllByProps({ 'data-input': 'agentRuntimeId' })).toHaveLength(0);
 
     const otherCli = renderAgent({ cliId: 'traex', agentSelectionKey: 'traex' });
@@ -154,6 +155,236 @@ describe('Codex-compatible runtime editor', () => {
 
     const oldWrapperPayload = renderAgent({ cliId: 'codex', wrapperCli: 'custom-launcher codex' });
     expect(oldWrapperPayload.root.findAllByProps({ 'data-codex-runtime': '' })).toHaveLength(0);
+  });
+
+  it('shows and saves the configured Codex reasoning effort', async () => {
+    const previousFetch = globalThis.fetch;
+    const requests: any[] = [];
+    (globalThis as any).fetch = vi.fn(async (_url: string, init?: any) => {
+      const body = JSON.parse(init?.body ?? '{}');
+      requests.push(body);
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ ok: true, cliId: 'codex', model: '', reasoningEffort: body.reasoningEffort, selectionKey: 'codex' }),
+      } as any;
+    });
+    try {
+      const { root } = renderAgent({ cliId: 'codex', model: 'gpt-5.6-sol', reasoningEffort: 'high' });
+      const picker = root.findByProps({ dataInput: 'agentReasoningEffort' });
+      expect(picker.props.value).toBe('high');
+      act(() => picker.props.onChange('ultra'));
+      await act(async () => {
+        root.findByProps({ 'data-action': 'save-agent' }).props.onClick();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(requests).toEqual([{ cliId: 'codex', model: 'gpt-5.6-sol', reasoningEffort: 'ultra' }]);
+    } finally {
+      (globalThis as any).fetch = previousFetch;
+    }
+  });
+
+  const dshCliState = {
+    options: [
+      { id: 'codex', label: 'Codex' },
+      { id: 'dsh', label: 'dsh' },
+    ],
+    ttadkModelDefault: '',
+    ttadkModelSuggestions: [],
+  };
+
+  function renderDsh(bot: Record<string, any>, patchBot = vi.fn()) {
+    let renderer!: TestRenderer.ReactTestRenderer;
+    act(() => {
+      renderer = TestRenderer.create(React.createElement(BotAgentSection, {
+        bot: { larkAppId: 'cli_dsh', model: '', ...bot },
+        sessionFallback: 'dsh',
+        cliState: dshCliState as any,
+        patchBot,
+      }));
+    });
+    return { renderer, root: renderer.root, patchBot };
+  }
+
+  it('shows the dsh turn timeout in minutes and PUTs it as milliseconds', async () => {
+    const previousFetch = globalThis.fetch;
+    const requests: any[] = [];
+    (globalThis as any).fetch = vi.fn(async (_url: string, init?: any) => {
+      const body = JSON.parse(init?.body ?? '{}');
+      requests.push(body);
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ ok: true, cliId: 'dsh', model: '', turnTimeoutMs: body.turnTimeoutMs, selectionKey: 'dsh' }),
+      } as any;
+    });
+    try {
+      // 1_800_000 ms = 30 min
+      const { root } = renderDsh({ cliId: 'dsh', turnTimeoutMs: 1_800_000 });
+      const input = root.findByProps({ 'data-input': 'agentTurnTimeout' });
+      expect(input.props.value).toBe('30');
+      act(() => input.props.onChange({ currentTarget: { value: '45' } }));
+      await act(async () => {
+        root.findByProps({ 'data-action': 'save-agent' }).props.onClick();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      // 45 min → 2_700_000 ms
+      expect(requests).toEqual([{ cliId: 'dsh', model: '', reasoningEffort: '', turnTimeoutMs: 2_700_000 }]);
+    } finally {
+      (globalThis as any).fetch = previousFetch;
+    }
+  });
+
+  it('clears the dsh turn timeout to the runner default when emptied', async () => {
+    const previousFetch = globalThis.fetch;
+    const requests: any[] = [];
+    (globalThis as any).fetch = vi.fn(async (_url: string, init?: any) => {
+      const body = JSON.parse(init?.body ?? '{}');
+      requests.push(body);
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ ok: true, cliId: 'dsh', model: '', turnTimeoutMs: null, selectionKey: 'dsh' }),
+      } as any;
+    });
+    try {
+      const { root } = renderDsh({ cliId: 'dsh', turnTimeoutMs: 1_800_000 });
+      const input = root.findByProps({ 'data-input': 'agentTurnTimeout' });
+      expect(input.props.value).toBe('30');
+      act(() => input.props.onChange({ currentTarget: { value: '' } }));
+      await act(async () => {
+        root.findByProps({ 'data-action': 'save-agent' }).props.onClick();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      // Empty → '' so the daemon deletes the field (revert to 10-min default).
+      expect(requests).toEqual([{ cliId: 'dsh', model: '', reasoningEffort: '', turnTimeoutMs: '' }]);
+    } finally {
+      (globalThis as any).fetch = previousFetch;
+    }
+  });
+
+  it('omits the turn timeout field for non-dsh CLIs', () => {
+    const { root } = renderDsh({ cliId: 'codex' });
+    expect(root.findAllByProps({ 'data-input': 'agentTurnTimeout' })).toHaveLength(0);
+  });
+
+  it('shows a legal non-whole-minute timeout and preserves it on a model-only save', async () => {
+    const previousFetch = globalThis.fetch;
+    const requests: any[] = [];
+    (globalThis as any).fetch = vi.fn(async (_url: string, init?: any) => {
+      const body = JSON.parse(init?.body ?? '{}');
+      requests.push(body);
+      return {
+        ok: true,
+        status: 200,
+        // Daemon preserved the stored ms because the field was absent from the body.
+        json: async () => ({ ok: true, cliId: 'dsh', model: body.model, turnTimeoutMs: 90_001, selectionKey: 'dsh' }),
+      } as any;
+    });
+    try {
+      // 90_001 ms is a legal positive integer but not a whole minute.
+      const { root } = renderDsh({ cliId: 'dsh', model: 'm0', turnTimeoutMs: 90_001 });
+      const input = root.findByProps({ 'data-input': 'agentTurnTimeout' });
+      // Shown as exact decimal minutes (≈ 1.5000166667), never blanked.
+      expect(input.props.value).not.toBe('');
+      expect(Math.round(Number(input.props.value) * 60_000)).toBe(90_001);
+      // Edit only the model, then save. The untouched timeout must be omitted so
+      // the daemon preserves 90_001 instead of clearing it.
+      const modelInput = root.findByProps({ 'data-input': 'agentModel' });
+      act(() => modelInput.props.onChange({ currentTarget: { value: 'm1' } }));
+      await act(async () => {
+        root.findByProps({ 'data-action': 'save-agent' }).props.onClick();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(requests).toEqual([{ cliId: 'dsh', model: 'm1', reasoningEffort: '' }]);
+      expect(Object.prototype.hasOwnProperty.call(requests[0], 'turnTimeoutMs')).toBe(false);
+    } finally {
+      (globalThis as any).fetch = previousFetch;
+    }
+  });
+
+  it('re-saves the displayed non-whole-minute value back to the exact stored ms', async () => {
+    const previousFetch = globalThis.fetch;
+    const requests: any[] = [];
+    (globalThis as any).fetch = vi.fn(async (_url: string, init?: any) => {
+      const body = JSON.parse(init?.body ?? '{}');
+      requests.push(body);
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ ok: true, cliId: 'dsh', model: '', turnTimeoutMs: body.turnTimeoutMs, selectionKey: 'dsh' }),
+      } as any;
+    });
+    try {
+      const { root } = renderDsh({ cliId: 'dsh', turnTimeoutMs: 90_001 });
+      const input = root.findByProps({ 'data-input': 'agentTurnTimeout' });
+      const shown = input.props.value; // e.g. "1.5000166667"
+      // Re-enter the exact displayed minutes (a touch) and save: rounding to the
+      // nearest ms must reproduce 90_001, not error on a ~2e-6 float mismatch.
+      act(() => input.props.onChange({ currentTarget: { value: shown } }));
+      await act(async () => {
+        root.findByProps({ 'data-action': 'save-agent' }).props.onClick();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(requests).toEqual([{ cliId: 'dsh', model: '', reasoningEffort: '', turnTimeoutMs: 90_001 }]);
+      expect(root.findAllByProps({ 'data-turn-timeout-error': '' })).toHaveLength(0);
+    } finally {
+      (globalThis as any).fetch = previousFetch;
+    }
+  });
+
+  it('blocks the save and shows an inline error on invalid turn timeout input', async () => {
+    const previousFetch = globalThis.fetch;
+    const requests: any[] = [];
+    (globalThis as any).fetch = vi.fn(async (_url: string, init?: any) => {
+      requests.push(JSON.parse(init?.body ?? '{}'));
+      return { ok: true, status: 200, json: async () => ({ ok: true, cliId: 'dsh', model: '', turnTimeoutMs: null, selectionKey: 'dsh' }) } as any;
+    });
+    try {
+      const { root } = renderDsh({ cliId: 'dsh', turnTimeoutMs: 600_000 });
+      const input = root.findByProps({ 'data-input': 'agentTurnTimeout' });
+      // 0 is not a clearable blank and not a positive timeout → must error, not clear.
+      act(() => input.props.onChange({ currentTarget: { value: '0' } }));
+      await act(async () => {
+        root.findByProps({ 'data-action': 'save-agent' }).props.onClick();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      // No PUT happened; an inline error is shown.
+      expect(requests).toEqual([]);
+      expect(root.findAllByProps({ 'data-turn-timeout-error': '' }).length).toBeGreaterThan(0);
+    } finally {
+      (globalThis as any).fetch = previousFetch;
+    }
+  });
+
+  it('blocks the save when the minutes value exceeds the arm-able millisecond bound', async () => {
+    const previousFetch = globalThis.fetch;
+    const requests: any[] = [];
+    (globalThis as any).fetch = vi.fn(async (_url: string, init?: any) => {
+      requests.push(JSON.parse(init?.body ?? '{}'));
+      return { ok: true, status: 200, json: async () => ({ ok: true, cliId: 'dsh', model: '', turnTimeoutMs: null, selectionKey: 'dsh' }) } as any;
+    });
+    try {
+      const { root } = renderDsh({ cliId: 'dsh', turnTimeoutMs: 600_000 });
+      const input = root.findByProps({ 'data-input': 'agentTurnTimeout' });
+      // 40000 min = 2.4e9 ms > 2_147_483_647 ms → invalid (would overflow setTimeout).
+      act(() => input.props.onChange({ currentTarget: { value: '40000' } }));
+      await act(async () => {
+        root.findByProps({ 'data-action': 'save-agent' }).props.onClick();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(requests).toEqual([]);
+      expect(root.findAllByProps({ 'data-turn-timeout-error': '' }).length).toBeGreaterThan(0);
+    } finally {
+      (globalThis as any).fetch = previousFetch;
+    }
   });
 
   it('shows a legacy path as read-only and omits cliRuntime on a model-only save', async () => {
@@ -198,7 +429,7 @@ describe('Codex-compatible runtime editor', () => {
         await Promise.resolve();
       });
 
-      expect(requests).toEqual([{ cliId: 'codex', model: 'new-model' }]);
+      expect(requests).toEqual([{ cliId: 'codex', model: 'new-model', reasoningEffort: '' }]);
       expect(patchBot).toHaveBeenCalledWith('cli_runtime', expect.objectContaining({
         cliRuntime: null,
         cliPathOverride: legacyPath,
@@ -241,7 +472,7 @@ describe('Codex-compatible runtime editor', () => {
         await Promise.resolve();
       });
 
-      expect(requests).toEqual([{ cliId: 'codex', model: '', cliRuntime: null }]);
+      expect(requests).toEqual([{ cliId: 'codex', model: '', reasoningEffort: '', cliRuntime: null }]);
       expect(root.findByProps({ 'data-agent-status': '' }).children.join('')).toContain('2');
     } finally {
       (globalThis as any).fetch = previousFetch;
@@ -288,7 +519,7 @@ describe('Codex-compatible runtime editor', () => {
         await Promise.resolve();
       });
 
-      expect(requests).toEqual([{ cliId: 'codex', model: '', cliRuntime: savedRuntime }]);
+      expect(requests).toEqual([{ cliId: 'codex', model: '', reasoningEffort: '', cliRuntime: savedRuntime }]);
     } finally {
       (globalThis as any).fetch = previousFetch;
     }
@@ -343,7 +574,7 @@ describe('Codex-compatible runtime editor', () => {
         await Promise.resolve();
         await Promise.resolve();
       });
-      expect(requests).toEqual([{ cliId: 'codex', model: 'gpt-next' }]);
+      expect(requests).toEqual([{ cliId: 'codex', model: 'gpt-next', reasoningEffort: '' }]);
     } finally {
       (globalThis as any).fetch = previousFetch;
     }
@@ -392,7 +623,7 @@ describe('Codex-compatible runtime editor', () => {
 
       expect(requests).toEqual([{
         url: '/api/bots/cli_runtime/agent',
-        body: { cliId: 'codex', model: '', cliRuntime: savedRuntime },
+        body: { cliId: 'codex', model: '', reasoningEffort: '', cliRuntime: savedRuntime },
       }]);
       expect(patchBot).toHaveBeenCalledWith('cli_runtime', expect.objectContaining({ cliRuntime: savedRuntime }));
       const probeText = root.findByProps({ 'data-runtime-status': '' }).children.join('');
@@ -431,7 +662,7 @@ describe('Codex-compatible runtime editor', () => {
         await Promise.resolve();
         await Promise.resolve();
       });
-      expect(requests[requests.length - 1]).toEqual({ cliId: 'codex', model: '', cliRuntime: null });
+      expect(requests[requests.length - 1]).toEqual({ cliId: 'codex', model: '', reasoningEffort: '', cliRuntime: null });
     } finally {
       (globalThis as any).fetch = previousFetch;
     }

@@ -36,9 +36,13 @@ import {
   buildOverloadExpiredCard,
   OVERLOAD_ACTION_CLEAN_STOPPED,
   OVERLOAD_ACTION_SUSPEND_IDLE,
+  OVERLOAD_ACTION_RESTART_BROWSER,
   OVERLOAD_ACTION_NOOP,
+  buildOverloadBrowserFailureCard,
   type OverloadCardState,
 } from '../../core/host-overload-alert.js';
+import { restartBrowser, resolveBrowserTargets } from '../../core/browser-restart.js';
+import { readGlobalConfig } from '../../global-config.js';
 import { listOnlineDaemons } from '../../utils/daemon-discovery.js';
 import { fetchDaemonIpc } from '../../core/daemon-ipc-auth.js';
 import { recordObservedBots } from '../../services/observed-bots-store.js';
@@ -84,7 +88,7 @@ import { ttadkConfigModelChoices } from '../../setup/cli-selection.js';
 import { logger } from '../../utils/logger.js';
 import * as sessionStore from '../../services/session-store.js';
 import { loadFrozenCards, saveFrozenCards } from '../../services/frozen-card-store.js';
-import { forkWorker, sendWorkerInput, sendWorkerSessionInput, killWorker, closeSession as closeWorkerPoolSession, teardownAuthoritativePersistentBackingBeforeClose, scheduleCardPatch, parkStreamCard, clearUsageLimitState, cardUsageLimit, writableTerminalLinkFor, workerHasInitialized, sessionSupportsWebTerminal, readableTerminalUrlFor, resolvePrivateCardAudience, deliverWriteLinkCard, deliverEphemeralOrReply, CARD_POSTING_SENTINEL, requestSessionRestart, isSessionTransferring, getDaemonStreamingCardUsageSnapshot, withActiveSessionKeyLock } from '../../core/worker-pool.js';
+import { forkWorker, sendWorkerInput, sendWorkerSessionInput, killWorker, closeSession as closeWorkerPoolSession, teardownAuthoritativePersistentBackingBeforeClose, scheduleCardPatch, parkStreamCard, clearUsageLimitState, cardUsageLimit, writableTerminalLinkFor, workerHasInitialized, sessionSupportsWebTerminal, readableTerminalUrlFor, resolvePrivateCardAudience, deliverWriteLinkCard, deliverEphemeralOrReply, CARD_POSTING_SENTINEL, requestSessionRestart, isSessionTransferring, getDaemonStreamingCardUsageSnapshot, withActiveSessionKeyLock, type WorkerSessionReplyOptions } from '../../core/worker-pool.js';
 import { getSessionWorkingDir, buildNewTopicCliInput, getAvailableBots, persistStreamCardState, resumeSession, rememberLastCliInput, ensureSessionWhiteboard } from '../../core/session-manager.js';
 import { markInitialUserTurnPending } from '../../core/initial-user-turn.js';
 import { publishAttentionPatch, publishClosedSessionPatch, announcePendingRepoSession } from '../../core/session-activity.js';
@@ -118,7 +122,7 @@ import { runDetachedBotTurnAdmission, withBotTurnAdmission, withBotTurnMutation 
 
 export interface CardHandlerDeps {
   activeSessions: Map<string, DaemonSession>;
-  sessionReply: (rootId: string, content: string, msgType?: string, larkAppId?: string, turnId?: string) => Promise<string>;
+  sessionReply: (rootId: string, content: string, msgType?: string, larkAppId?: string, turnId?: string, opts?: WorkerSessionReplyOptions) => Promise<string>;
   lastRepoScan: Map<string, ProjectInfo[]>;
   /** v3 humanGate 审批卡点击处理（driveRun 由 daemon 接的 v3 gate runner 提供）. */
   v3GateDeps?: V3GateCardHandlerDeps;
@@ -951,6 +955,27 @@ export async function countHostOverload(): Promise<{ stopped: number; idle: numb
   return { stopped, idle };
 }
 
+/** Resolve a card's actual visible placement from Lark, not action.value
+ * (which is round-tripped client data and therefore untrusted). */
+async function cardReplyOptions(
+  larkAppId: string | undefined,
+  cardMessageId: string | undefined,
+  expectedChatId: string,
+): Promise<WorkerSessionReplyOptions | undefined> {
+  if (!larkAppId || !cardMessageId) return undefined;
+  try {
+    const detail = await getMessageDetail(larkAppId, cardMessageId);
+    const item = detail?.items?.[0];
+    if (!item || item.chat_id !== expectedChatId) return undefined;
+    return item.thread_id
+      ? { replyTarget: { mode: 'thread', rootMessageId: cardMessageId } }
+      : { replyTarget: { mode: 'plain', chatId: item.chat_id } };
+  } catch (err) {
+    logger.debug(`card reply-placement probe failed; preserving legacy route: ${err}`);
+    return undefined;
+  }
+}
+
 export async function handleCardAction(data: CardActionData, deps: CardHandlerDeps, larkAppId?: string): Promise<any> {
   const { activeSessions, lastRepoScan } = deps;
   // turnId is forwarded only when the caller actually has a turn anchor
@@ -1024,6 +1049,83 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
     }
     logger.info(`[overload] ${value.action} by owner ${operatorOpenId}: affected=${affected}, remaining stopped=${st.stopped} idle=${st.idle}`);
     // Rebuild the SAME card: clicked button → ✓done+disabled, other → still live.
+    return JSON.parse(buildOverloadAlertCard(st));
+  }
+  // ─── 过载告警卡：重启浏览器（overload_restart_browser）────────────────────
+  // owner 强闸门 + 按 bundleId 分开的一次性 nonce 核销（可分别重启 Arc/Chrome/Edge，
+  // 各一次）。重启在本机 daemon 直接执行（浏览器就跑在本机），不跨 daemon 扇出。
+  if (value?.action === OVERLOAD_ACTION_RESTART_BROWSER && larkAppId) {
+    const owner = getOwnerOpenId(larkAppId);
+    if (!operatorOpenId || operatorOpenId !== owner) {
+      logger.info(`Overload browser-restart blocked for non-owner: ${operatorOpenId}`);
+      return { toast: { type: 'error', content: '仅管理员可操作' } };
+    }
+    const bundleId = typeof value.bundleId === 'string' ? value.bundleId : '';
+    if (!bundleId) return { toast: { type: 'error', content: '按钮缺少 bundleId' } };
+    let st: OverloadCardState;
+    try { st = JSON.parse(value.st ?? ''); } catch { return JSON.parse(buildOverloadExpiredCard()); }
+    if (!st?.nonce) return JSON.parse(buildOverloadExpiredCard());
+    // Fail-closed against config drift: the button lives
+    // on a card that stays clickable for the nonce's 1h TTL, but the config's
+    // enabled targets can change underneath it (a target disabled via
+    // `enabled:false` or removed entirely). Before we quit a real host browser,
+    // require the bundleId to be present BOTH on this card's `st.browsers` (it
+    // was a rendered button, not a forged value) AND in the live resolved
+    // enabled targets (it's still an allowed target right now). Either miss →
+    // refuse without touching the browser, so a stale card can't kill a browser
+    // the operator has since taken off the allow-list.
+    const target = (st.browsers ?? []).find(b => b.bundleId === bundleId);
+    let liveTargets: ReturnType<typeof resolveBrowserTargets> = [];
+    try {
+      const alertCfg = (readGlobalConfig().hostOverloadAlert ?? {}) as { browserRestartTargets?: unknown };
+      liveTargets = resolveBrowserTargets(alertCfg.browserRestartTargets);
+    } catch { /* resolver is pure over config; treat a throw as "no live targets" → fail-closed below */ }
+    const liveTarget = liveTargets.find(t => t.bundleId === bundleId);
+    if (!target || !liveTarget) {
+      logger.info(`[overload] restart browser refused (config drift): bundleId=${bundleId} onCard=${!!target} liveEnabled=${!!liveTarget}`);
+      return JSON.parse(buildOverloadExpiredCard('该浏览器的重启配置已变更或卡片已过期，未执行。'));
+    }
+    const label = target.label ?? liveTarget.label ?? bundleId;
+    // One-shot per (nonce, bundleId): each browser button burns its own claim so
+    // the owner can bounce several browsers on one card, but none twice.
+    const claimKey = `${OVERLOAD_ACTION_RESTART_BROWSER}:${bundleId}`;
+    if (!claimOverloadNonce(st.nonce, claimKey)) {
+      return JSON.parse(buildOverloadExpiredCard('这个按钮已点过，或该告警卡已过期。'));
+    }
+    const openArgs = liveTarget.openArgs;
+    let result;
+    try {
+      result = await restartBrowser({ bundleId, ...(openArgs ? { openArgs } : {}) });
+    } catch (err) {
+      logger.warn(`[overload] restart browser ${label} threw: ${err instanceof Error ? err.message : String(err)}`);
+      releaseOverloadNonce(st.nonce, claimKey);
+      // Return a VISIBLE card, not a toast: the handler can
+      // run up to ~12s (quit-wait), which exceeds the 2.5s card-ACK window — a
+      // toast-only result after that ACK is silently dropped by the dispatcher.
+      // buildOverloadBrowserFailureCard renders a patchable card carrying the
+      // rebuilt alert `st`, so the owner actually sees the failure + can retry.
+      return JSON.parse(buildOverloadBrowserFailureCard(st, label, '重启失败，请稍后重试'));
+    }
+    if (!result.ok) {
+      // Quit never happened (e.g. unsaved-changes dialog) — nothing was killed;
+      // release the claim so the owner can retry after handling the dialog. Same
+      // reasoning as above: deliver via a patchable card, never a toast.
+      logger.warn(`[overload] restart browser ${label} not ok: ${result.error ?? 'unknown'}`);
+      releaseOverloadNonce(st.nonce, claimKey);
+      return JSON.parse(buildOverloadBrowserFailureCard(st, label, result.error ?? '重启失败'));
+    }
+    if (!result.relaunched) {
+      // Quit succeeded but relaunch failed: the browser is
+      // now DOWN, not restarted. Do NOT mark it「✓已重启」and do NOT burn the
+      // claim — release it so the owner can retry the reopen. Report the true
+      // state (已退出未重开) on a patchable card.
+      logger.warn(`[overload] browser ${label} quit but relaunch failed: ${result.error ?? 'unknown'}`);
+      releaseOverloadNonce(st.nonce, claimKey);
+      return JSON.parse(buildOverloadBrowserFailureCard(st, label, `已退出但重开失败：${result.error ?? '未知错误'}。可再点一次重试重开`));
+    }
+    // Mark this browser done on the card (button → ✓已重启, disabled).
+    st.restartedBrowsers = [...new Set([...(st.restartedBrowsers ?? []), bundleId])];
+    logger.info(`[overload] browser ${label} restarted by owner ${operatorOpenId} (relaunched=${result.relaunched})`);
     return JSON.parse(buildOverloadAlertCard(st));
   }
   // ─── 群内授权卡片动作（限制提交 + grant/revoke，talk-only）──────────────────
@@ -1201,6 +1303,26 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
 
   if (isAskCardAction(value?.action)) {
     return handleAskCardAction(data);
+  }
+
+  if (['feedback_submit', 'feedback_reason', 'feedback_comment', 'skill_feedback_submit'].includes(value?.action ?? '') && larkAppId) {
+    const { handleSkillFeedbackCardAction } = await import('./skill-feedback-card.js');
+    const { getSkillFeedbackStore } = await import('../../services/skill-feedback-store.js');
+    const { config } = await import('../../config.js');
+    return handleSkillFeedbackCardAction(data, larkAppId, {
+      store: await getSkillFeedbackStore(config.session.dataDir),
+      loadBaseCard: async (platformMessageId) => {
+        const detail = await getMessageDetail(larkAppId, platformMessageId);
+        const content = detail?.items?.[0]?.body?.content ?? detail?.body?.content;
+        if (typeof content !== 'string') return undefined;
+        try {
+          const parsed = JSON.parse(content);
+          return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : undefined;
+        } catch {
+          return undefined;
+        }
+      },
+    });
   }
 
   if (
@@ -1974,6 +2096,33 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
     const sKey = sessionKey(rootId, larkAppId);
     const ds = activeSessions.get(sKey);
     if (!ds) return { toast: { type: 'error', content: t('card.adopt.toast_no_session', undefined, loc) } };
+    // The picker can live in a folded chat-scope topic while rootId remains the
+    // chat session anchor. Freeze the trusted card placement before adoption
+    // mutates the session, so its success/error replies stay beside the picker.
+    const replyOptionsPromise = cardReplyOptions(larkAppId, cardMessageId, ds.chatId);
+    const pickerSessionReply: CardHandlerDeps['sessionReply'] = async (
+      rid,
+      content,
+      msgType,
+      appId,
+      turnId,
+      opts,
+    ) => {
+      const placement = await replyOptionsPromise;
+      return deps.sessionReply(
+        rid,
+        content,
+        msgType,
+        appId,
+        turnId,
+        opts?.replyTarget || !placement
+          ? opts
+          : { ...opts, replyTarget: placement.replyTarget },
+      );
+    };
+    const pickerDeps: CardHandlerDeps = { ...deps, sessionReply: pickerSessionReply };
+    const pickerReply = (content: string, msgType?: string) =>
+      pickerSessionReply(rootId, content, msgType, larkAppId);
     const sourceSession = ds.session;
     if (isSessionTransferring(ds)) {
       return { toast: { type: 'warning', content: t('cmd.session.transfer_in_progress', undefined, localeForBot(ds.larkAppId)) } };
@@ -2002,12 +2151,12 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
       }
       const target = resumable.find(r => r.cliSessionId === cliSessionId);
       if (!target) {
-        await sessionReply(rootId, t('cmd.adopt.resume_not_found', { id: cliSessionId }, localeForBot(ds.larkAppId)));
+        await pickerReply(t('cmd.adopt.resume_not_found', { id: cliSessionId }, localeForBot(ds.larkAppId)));
         clearAdoptCandidates(rootId);
         if (cardMessageId && larkAppId) deleteMessage(larkAppId, cardMessageId);
         return;
       }
-      await startResumeImportSession(target, ds, { activeSessions, sessionReply: deps.sessionReply, getActiveCount: () => 0, lastRepoScan }, larkAppId);
+      await startResumeImportSession(target, ds, { ...pickerDeps, getActiveCount: () => 0 }, larkAppId);
       clearAdoptCandidates(rootId);
       if (cardMessageId && larkAppId) deleteMessage(larkAppId, cardMessageId);
       return;
@@ -2064,13 +2213,13 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
       return { toast: { type: 'warning', content: t('cmd.session.transfer_in_progress', undefined, localeForBot(ds.larkAppId)) } };
     }
     if (!target) {
-      await sessionReply(rootId, t('cmd.adopt.target_exited', undefined, localeForBot(ds.larkAppId)));
+      await pickerReply(t('cmd.adopt.target_exited', undefined, localeForBot(ds.larkAppId)));
       clearAdoptCandidates(rootId);
       if (cardMessageId && larkAppId) deleteMessage(larkAppId, cardMessageId);
       return;
     }
     const { startAdoptSession } = await import('../../core/command-handler.js');
-    await startAdoptSession(target, ds, { activeSessions, sessionReply: deps.sessionReply, getActiveCount: () => 0, lastRepoScan }, larkAppId);
+    await startAdoptSession(target, ds, { ...pickerDeps, getActiveCount: () => 0 }, larkAppId);
     clearAdoptCandidates(rootId);
     if (cardMessageId && larkAppId) deleteMessage(larkAppId, cardMessageId);
     return;

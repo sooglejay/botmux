@@ -29,6 +29,7 @@ import { fallbackTurnId, frozenReplyContextForTurn, isSubstituteTurn } from './r
 import { updateMessage, deleteMessage, sendEphemeralCard, sendUserMessage, addReaction, removeReaction, getMessageChatId, MessageWithdrawnError } from '../im/lark/client.js';
 import { buildStreamingCard, buildPrivateSnapshotCard, buildSessionCard, buildTuiPromptCard, buildTuiPromptResolvedCard, buildTuiPromptFailedCard, buildRelayedFrozenCard, getCliDisplayName } from '../im/lark/card-builder.js';
 import { codexServiceTierBadge } from '../services/codex-service-tier.js';
+import { codexModelSupportsReasoningEffort, isCodexReasoningCliId } from '../services/codex-reasoning-effort.js';
 import { loadFrozenCards, saveFrozenCards } from '../services/frozen-card-store.js';
 import { hashUrlForLog } from '../adapters/backend/riff-backend.js';
 import { logger } from '../utils/logger.js';
@@ -47,6 +48,7 @@ import { claudeJsonlPathForSession } from '../adapters/cli/claude-code.js';
 import { findUniqueClaudeSessionByCwd } from './session-discovery.js';
 import {
   buildMarkdownCard,
+  buildCanonicalFinalReplyCard,
   buildContextualReplyCard,
   type CardUsageSnapshot,
   type LocalHomeLinkMode,
@@ -70,6 +72,7 @@ import { getBot, getAllBots, loadBotConfigs, resolveBrandLabel, getLoadedConfigP
 import { RestartCoordinator, type RestartObserver } from './restart-coordinator.js';
 import { runtimeBuildIdentity } from '../utils/runtime-build-id.js';
 import { scrubWorkflowWorkerEnv } from '../utils/child-env.js';
+import { resolveFeedbackPolicyForDelivery, resolveFeedbackTeamId } from '../services/feedback-policy-resolver.js';
 
 /** A random id minted once per daemon process (this lifetime). Stamped onto
  *  isolated persistent panes so a suspend→resume reattach (same id) is
@@ -259,6 +262,7 @@ import type { CliId } from '../adapters/cli/types.js';
 import { isStructuredBridgeAdoptCli } from '../services/structured-bridge-clis.js';
 import { resolveEffectivePluginIds } from './plugins/effective.js';
 import { ensureGatewayEntry } from './plugins/mcp/gateway-installer.js';
+import { readPeerCrossRef } from '../services/peer-cross-ref-store.js';
 import type {
   CliTurnPayload,
   CodexAppDeliverySink,
@@ -1034,8 +1038,8 @@ function storedSessionCliDisplayName(ds: DaemonSession): string {
 
 function sessionAgentConfig(
   ds: DaemonSession,
-  botCfg: { cliId: CliId; cliRuntime?: CliRuntimeConfig; cliPathOverride?: string; wrapperCli?: string; model?: string },
-): { cliId: CliId; cliRuntime?: CliRuntimeSnapshot; cliPathOverride?: string; wrapperCli?: string; model?: string; reasoningEffort?: 'low' | 'medium' | 'high' | 'xhigh' } {
+  botCfg: { cliId: CliId; cliRuntime?: CliRuntimeConfig; cliPathOverride?: string; wrapperCli?: string; model?: string; reasoningEffort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra' },
+): { cliId: CliId; cliRuntime?: CliRuntimeSnapshot; cliPathOverride?: string; wrapperCli?: string; model?: string; reasoningEffort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra' } {
   // Freeze the agent launch config (cli / runtime / cliPath / wrapper / model) onto the
   // session the first time a worker forks, so later bot-level edits never
   // retroactively change a live session — same discipline as `sandbox`.
@@ -1068,6 +1072,9 @@ function sessionAgentConfig(
       ?? botCfg.cliPathOverride;
     ds.session.wrapperCli = ds.session.wrapperCli ?? botCfg.wrapperCli;
     ds.session.model = ds.session.model ?? botCfg.model;
+    ds.session.reasoningEffort = isCodexReasoningCliId(ds.session.cliId)
+      ? ds.session.reasoningEffort ?? botCfg.reasoningEffort
+      : undefined;
     ds.session.agentFrozen = true;
     sessionStore.updateSession(ds.session);
   } else {
@@ -1098,6 +1105,11 @@ function sessionAgentConfig(
     }
     if (repaired) sessionStore.updateSession(ds.session);
   }
+  if (ds.session.reasoningEffort
+      && !codexModelSupportsReasoningEffort(ds.session.model, ds.session.reasoningEffort)) {
+    ds.session.reasoningEffort = undefined;
+    sessionStore.updateSession(ds.session);
+  }
   return {
     cliId: ds.session.cliId ?? botCfg.cliId,
     cliRuntime: ds.session.cliRuntime,
@@ -1110,14 +1122,7 @@ function sessionAgentConfig(
 
 function loadKnownBotOpenIdsForApp(larkAppId: string): Set<string> {
   const dataDir = config.session.dataDir;
-  let crossRef: Record<string, string> = {};
-  const crossRefPath = join(dataDir, `bot-openids-${larkAppId}.json`);
-  if (existsSync(crossRefPath)) {
-    const parsed = JSON.parse(readFileSync(crossRefPath, 'utf-8'));
-    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-      crossRef = parsed as Record<string, string>;
-    }
-  }
+  const crossRef = readPeerCrossRef(dataDir, larkAppId);
 
   let botEntries: BotMentionEntry[] = [];
   const botInfoPath = join(dataDir, 'bots-info.json');
@@ -1134,7 +1139,7 @@ function loadKnownBotOpenIdsForApp(larkAppId: string): Set<string> {
  *  mircli runner). They can't @-trigger a peer bot themselves, so for bot-to-bot
  *  handoffs the fallback card must carry the real <at> back to the dispatcher. */
 function isRunnerDeliveryCli(cliId?: string): boolean {
-  return cliId === 'mira' || cliId === 'mir';
+  return cliId === 'mira' || cliId === 'mir' || cliId === 'dsh';
 }
 
 function daemonCardFooterRecipientOpenId(ds: DaemonSession, effectiveCliId?: string): string | undefined {
@@ -1868,14 +1873,13 @@ export async function deliverSubstituteControlCard(ds: DaemonSession): Promise<S
  * reply (`reply`). `content` is the card JSON when msgType==='interactive',
  * otherwise the plain text. Topic-group / p2p behavior is unchanged.
  *
- * IMPORTANT: ephemeral is only attempted for flat **chat-scope** sessions. The
+ * IMPORTANT: ephemeral is only attempted for a flat **chat-scope** destination. The
  * ephemeral API (`ephemeral/v1/send`) takes a `chat_id` only — it has no
  * thread/root anchoring — so for a **thread-scope** session (a 话题 inside a
  * 普通群, or a 话题群 topic) an ephemeral card would escape the topic and land at
- * the group top-level. 话题群 happened to reject ephemeral with 18053 and fall
- * back to the in-thread reply, but a 话题 inside a 普通群 succeeds and leaks the
- * card out of the thread. So thread-scope sessions always take the visible
- * `reply()` path, which routes back into the thread (`reply_in_thread`).
+ * the group top-level. The same applies when a chat-scope session is invoked
+ * from a folded thread: callers pass its frozen reply target, and any explicit
+ * thread/quote destination takes the visible `reply()` path.
  */
 export async function deliverEphemeralOrReply(
   ds: DaemonSession,
@@ -1883,8 +1887,16 @@ export async function deliverEphemeralOrReply(
   content: string,
   msgType: 'text' | 'interactive',
   reply: () => Promise<unknown>,
+  replyTarget?: FrozenSessionReplyTarget,
 ): Promise<void> {
-  if (operatorOpenId && ds.chatType !== 'p2p' && ds.scope === 'chat') {
+  // A chat-scope session can still be invoked from a folded thread. The
+  // ephemeral API has no root/thread field, so an explicitly frozen thread or
+  // quote target must take the visible reply path even though the session
+  // itself remains chat-scoped.
+  const allowsEphemeral = replyTarget
+    ? replyTarget.mode === 'plain'
+    : ds.scope === 'chat';
+  if (operatorOpenId && ds.chatType !== 'p2p' && allowsEphemeral) {
     try {
       // The ephemeral API is card-only (msg_type=text → 10003), so wrap a plain
       // confirmation line into a minimal markdown card.
@@ -1944,7 +1956,11 @@ function flushCardPatch(ds: DaemonSession): void {
   ds.pendingCardJson = undefined;
   ds.pendingCardId = undefined;
   ds.cardPatchInFlight = true;
+  let patchSucceeded = false;
   updateMessage(ds.larkAppId, cardId, json)
+    .then(() => {
+      patchSucceeded = true;
+    })
     .catch(err => {
       if (err instanceof MessageWithdrawnError) {
         // Only clear streamCardId when the withdrawn message is still the
@@ -1967,6 +1983,17 @@ function flushCardPatch(ds: DaemonSession): void {
     })
     .finally(() => {
       ds.cardPatchInFlight = false;
+      // A re-render can queue the exact same state while this PATCH is in
+      // flight. Drop only that adjacent duplicate after confirmed delivery.
+      // Failed PATCHes deliberately retain the queued item so it retries, and
+      // cardId participates in the comparison so a new turn's card is never
+      // mistaken for the card that just completed.
+      if (patchSucceeded
+        && ds.pendingCardId === cardId
+        && ds.pendingCardJson === json) {
+        ds.pendingCardJson = undefined;
+        ds.pendingCardId = undefined;
+      }
       if (ds.pendingCardJson) {
         flushCardPatch(ds);
       }
@@ -2866,6 +2893,30 @@ function reclaimParkedCrashDiagnostic(ds: DaemonSession): void {
   try { unlinkSync(join(config.session.dataDir, 'crash-diagnostics', `${ds.session.sessionId}.ansi`)); } catch { /* absent — benign */ }
 }
 
+/**
+ * Consume a queued suspend claim once its goal state is reached.
+ *
+ * A claim only ever means "suspend the generation that is producing right now".
+ * It is therefore consumed the moment that generation stops running, by ANY
+ * route — the deferred checkpoint itself, a `/cd` or read-isolation switch that
+ * suspended first, or an outright crash. Leaving it set is not a harmless
+ * no-op: `runPendingSuspendIfSettled` fires on the NEXT generation's first
+ * screen checkpoint, and its `ownsGeneration` predicate passes there (that
+ * worker legitimately owns the session), so the replacement gets suspended for
+ * a request that was never about it.
+ *
+ * The old code did have a "worker already gone → drop the flag" branch, but it
+ * lived inside the checkpoint — which by definition stops running once the
+ * session goes quiet. The clear needs to hang off the lifecycle events instead.
+ */
+function clearPendingSuspendClaim(ds: DaemonSession, why: string): void {
+  if (ds.pendingSuspendReason === undefined && ds.pendingSuspendGeneration === undefined) return;
+  const reason = ds.pendingSuspendReason;
+  ds.pendingSuspendReason = undefined;
+  ds.pendingSuspendGeneration = undefined;
+  logger.debug(`[${tag(ds)}] Cleared queued suspend claim (${reason ?? 'none'}): ${why}`);
+}
+
 export function suspendWorker(ds: DaemonSession, reason = 'suspended_idle'): boolean {
   if (hasProtectedSessionMutationOwnership(ds)) {
     logger.warn(`[${tag(ds)}] Refused worker suspend (${reason}) while Codex App dispatch ownership is non-empty`);
@@ -2939,9 +2990,100 @@ export function suspendWorker(ds: DaemonSession, reason = 'suspended_idle'): boo
       },
     });
   }
+  // Goal state reached. Whoever queued a suspend for this generation got what
+  // they asked for — including the paths that never touch the deferred
+  // checkpoint (`/cd`, read-isolation switch, sweepIdleWorkers).
+  clearPendingSuspendClaim(ds, `suspended (${reason})`);
   logger.info(`[${tag(ds)}] Worker + CLI suspended (${reason}); session stays active, cold-resumes from transcript on next message`);
   return true;
 }
+
+/**
+ * Cash in a queued suspend. Called once the session leaves the producing states
+ * it was queued for; a no-op during working/analyzing — that IS why it queued.
+ *
+ * Callers MUST defer this out of the status handler's synchronous body
+ * (queueMicrotask) — suspendWorker clears `ds.worker` and `ds.lastScreenStatus`,
+ * and the rest of that handler still reads both to record the usage delta, flip
+ * the turn reaction ✋→✅, emit the state-transition hook, and render the final
+ * card. Running it inline would skip exactly the turn-completion bookkeeping
+ * this whole feature exists to protect.
+ *
+ * `ownsGeneration` is the calling handler's generation check (`ownsWorkerSession`),
+ * and it is **defense-in-depth** — not a guard against a race anyone has shown to
+ * be reachable today. Two earlier drafts of this comment each claimed a concrete
+ * race; both were wrong, so the reasoning is spelled out here to stop a third:
+ *
+ *   - It is NOT "a stale worker's late `idle` reaches `screenshot_uploaded`":
+ *     the message handler's fence (`if (ds.worker !== worker) return`) sits
+ *     BEFORE the switch and already drops every message from a replaced worker.
+ *   - It is NOT "two microtasks in one tick, the first suspends + re-forks and
+ *     the second meets the replacement": `suspendWorker` only nulls `ds.worker`,
+ *     it never re-forks (a re-fork is driven by external input, i.e. a later
+ *     MACROtask), and the microtask queue drains without letting one in. The
+ *     second microtask therefore sees `ds.worker === null` and this predicate
+ *     early-returns on that — a replacement is not what it meets.
+ *
+ * What it does buy: a queued callback can only ever act while its own generation
+ * still owns the session. That keeps this deferral safe against future callers,
+ * new synchronous side effects between enqueue and drain, and any path that
+ * starts re-forking earlier than today. Consuming the claim is a destructive act
+ * on a live worker, so it is worth gating even without a demonstrated race.
+ * A checkpoint from a generation that no longer owns the session keeps the flag
+ * pending; only the owning generation may consume it.
+ *
+ * Deliberately the generation check ALONE, not `ownsLifecycleMutation` (which
+ * also folds in "not transferring"): a routing transfer is a temporary refusal,
+ * not a lost claim, and it is suspendWorker's own guard to make. Screen updates
+ * stop once a session sits quiet, so treating transfer as "not ours" would park
+ * the flag with no later checkpoint to revive it — hence the explicit
+ * transfer-settled retry below.
+ */
+function runPendingSuspendIfSettled(ds: DaemonSession, ownsGeneration?: () => boolean): void {
+  const reason = ds.pendingSuspendReason;
+  if (!reason) return;
+  if (ownsGeneration && !ownsGeneration()) return;
+  // A claim belongs to the generation that was producing when it was queued.
+  // Reaching a LATER generation means its own fulfilment checkpoint never ran
+  // (crash, or another path suspended first) — consume it rather than suspend a
+  // worker the request never asked about. clearPendingSuspendClaim covers the
+  // normal exits; this is the backstop for a claim that slipped past them.
+  if (
+    ds.pendingSuspendGeneration !== undefined
+    && ds.workerGeneration !== undefined
+    && ds.pendingSuspendGeneration !== ds.workerGeneration
+  ) {
+    clearPendingSuspendClaim(ds, 'generation changed');
+    return;
+  }
+  const st = ds.lastScreenStatus;
+  if (st !== 'idle' && st !== 'limited') return;
+  // Worker already gone (crash / suspended by another path): the goal state is
+  // reached, so drop the flag. Falling through to suspendWorker would take its
+  // no-worker branch and clear managedTurnOrigin/workerReady for a generation
+  // this queued request never owned.
+  if (!ds.worker || ds.worker.killed) {
+    clearPendingSuspendClaim(ds, 'worker already gone');
+    return;
+  }
+  // Clear only on success. suspendWorker refuses mid-routing-transfer (and for a
+  // backend that stopped being suspendable), and that refusal is temporary —
+  // eating the flag would silently drop the request until the next `suspend all`.
+  if (suspendWorker(ds, reason)) {
+    // suspendWorker already consumed the claim (goal state reached); logging
+    // here keeps the "fulfilled by the deferred path" signal distinguishable
+    // from a suspend that came from anywhere else.
+    logger.info(`[${tag(ds)}] Deferred suspend fulfilled (${reason}) after turn completed`);
+    return;
+  }
+  // Refused by an in-flight transfer: keeping the flag is not enough on its own.
+  // A settled session emits no further screen updates, so there may be no next
+  // checkpoint — re-run when the relay gate releases. Returns false when no
+  // transfer is active (a non-transfer refusal, e.g. pty), which needs no retry.
+  deferUntilSessionTransferSettled(ds, () => runPendingSuspendIfSettled(ds, ownsGeneration));
+}
+
+export const __testOnly_runPendingSuspendIfSettled = runPendingSuspendIfSettled;
 
 function armWorkerKillBackstop(w: ChildProcess, label: string, sigtermMs: number = WORKER_SIGTERM_BACKSTOP_MS): void {
   const sigterm = setTimeout(() => {
@@ -4914,7 +5056,7 @@ export async function forkSession(
   //   • model / reasoningEffort / cliPathOverride / wrapperCli / agentFrozen:
   //     without these the child's sessionAgentConfig() sees !agentFrozen and
   //     re-freezes from the CURRENT bot config, silently dropping any per-session
-  //     /model or /effort override the source carried (reasoningEffort has no
+  //     model or effort override the source carried (reasoningEffort has no
   //     botCfg fallback at all → drops to undefined). Copying the frozen tuple
   //     keeps the clone's launch identity == the source's.
   // readIsolation is intentionally NOT copied: it is not a persisted Session
@@ -6245,7 +6387,7 @@ export function forkWorker(
   let spawnedWorker: ChildProcess | undefined;
   let worker!: ChildProcess;
   let startupState!: WorkerStartupState;
-  let initMsg!: DaemonToWorker;
+  let initMsg!: Extract<DaemonToWorker, { type: 'init' }>;
   let agentCfg!: ReturnType<typeof sessionAgentConfig>;
   const t = tag(ds);
   ds.localProcessAttestation = undefined;
@@ -6667,6 +6809,8 @@ export function forkWorker(
 
   // Send init config — use per-bot settings
   const runtimeIdentity = runtimeBuildIdentity();
+  const feedbackPolicy = resolveFeedbackPolicyForDelivery({ dataDir: config.session.dataDir, larkAppId: ds.larkAppId, chatId: ds.chatId, bot: botCfg });
+  ds.feedbackPolicy = feedbackPolicy;
   initMsg = {
     type: 'init',
     sessionId: ds.session.sessionId,
@@ -6681,6 +6825,9 @@ export function forkWorker(
     launchShell: botCfg.launchShell,
     model: agentCfg.model,
     reasoningEffort: agentCfg.reasoningEffort,
+    // dsh runner turn timeout: read live from bot config so tuning bots.json
+    // takes effect on the next worker fork without recreating the session.
+    turnTimeoutMs: botCfg.turnTimeoutMs,
     disableCliBypass: botCfg.disableCliBypass === true,
     codexRpcInput: botCfg.codexRpcInput === true || config.codexRpcInputDefault,
     // Startup commands run on every fresh spawn (incl. resume) so session-only
@@ -6753,6 +6900,7 @@ export function forkWorker(
     // Feishu (uploader/cred-write are also skipped downstream on the same test).
     larkAppSecret: larkTransportEnabled({ chatId: ds.chatId, apiOnly: botCfg.apiOnly }) ? botCfg.larkAppSecret : '',
     apiOnly: botCfg.apiOnly,
+    feedback: feedbackPolicy,
     // Freeze the ACTUAL loaded bots-config path (getLoadedConfigPath) so a
     // no-transport worker's fs-policy denies it from a HOST-owned fact, not a
     // guess off BOTS_CONFIG env (which the agent could see/forge). When it lives
@@ -7838,6 +7986,11 @@ function setupWorkerHandlers(
         updateUsageLimitState(ds, msg.usageLimit);
         ds.lastScreenContent = msg.content;
         ds.lastScreenStatus = (msg.usageLimit ?? ds.usageLimit) ? 'limited' : msg.status;
+        // A suspend that arrived mid-turn parked itself here. Defer until this
+        // screen_update has finished using process state — suspendWorker nulls
+        // `worker` + `lastScreenStatus`, which everything below still reads
+        // (usage ledger, turn reactions, transition hook, final card).
+        queueMicrotask(() => runPendingSuspendIfSettled(ds, ownsWorkerSession));
 
         // State-boundary clear: the moment we leave `working` (→ idle/limited),
         // stop the periodic usage refresh immediately — BEFORE the aux-UI /
@@ -8059,6 +8212,14 @@ function setupWorkerHandlers(
         const prevStatus = ds.lastScreenStatus;
         updateUsageLimitState(ds, msg.usageLimit);
         ds.lastScreenStatus = (msg.usageLimit ?? ds.usageLimit) ? 'limited' : msg.status;
+        // Same deferred-suspend checkpoint as the screen_update branch, and
+        // deferred for the same reason (see runPendingSuspendIfSettled).
+        // The predicate is defense-in-depth here: the handler's fence already
+        // dropped every message from a replaced worker before the switch, so a
+        // stale `idle` cannot reach this case at all. Passing it keeps the
+        // deferred callback from acting on a generation that stopped owning the
+        // session between enqueue and drain.
+        queueMicrotask(() => runPendingSuspendIfSettled(ds, ownsWorkerSession));
         emitSessionStateTransitionHook(ds, prevStatus, ds.lastScreenStatus, {
           source: 'screenshot_uploaded',
           imageKey: msg.imageKey,
@@ -8902,12 +9063,13 @@ function setupWorkerHandlers(
           logger.warn(`[${t}] Dropped managed_turn_origin with mismatched sessionId`);
           break;
         }
-        // macOS uses one stable per-session pathname visible inside Seatbelt.
+        // Isolated children use one stable per-session pathname visible through
+        // an exact Seatbelt/bwrap read carve-out.
         // Only the daemon handler for the CURRENT ChildProcess generation may
         // replace it. Stale workers can still emit IPC, but the identity guard
         // above drops them before filesystem mutation, so they cannot overwrite
         // a successor capability (or unlink it during teardown).
-        if (process.platform === 'darwin' && msg.originChannelId) {
+        if (msg.originChannelId) {
           if (!/^[a-f0-9]{64}$/.test(msg.originChannelId)) {
             ds.managedTurnOrigin = undefined;
             logger.error(`[${t}] Refused managed origin publication with an invalid pane channel`);
@@ -9363,6 +9525,11 @@ function setupWorkerHandlers(
       ds.worker = null;
       ds.workerReady = false;
       ds.workerPort = null;
+      // A queued suspend for THIS generation is now moot — the worker it was
+      // about is gone. Leaving it set would suspend the replacement on its
+      // first idle (the deferred checkpoint's own "worker gone" branch cannot
+      // help: it only runs on a screen update that will never arrive).
+      clearPendingSuspendClaim(ds, 'worker exited');
       // Dead worker generation — stop the periodic usage refresh immediately
       // instead of waiting a tick for it to self-clear on !workerHasInitialized.
       clearUsageRefreshTimer(ds);
@@ -9434,6 +9601,27 @@ function setupWorkerHandlers(
 
 const FINAL_OUTPUT_RETRY_BACKOFF_MS = [0, 5000, 15000];  // immediate, +5s, +15s
 const codexAppFinalSettlementInFlight = new Map<string, Promise<boolean>>();
+
+/**
+ * Shutdown-only view of the in-flight Codex App final-settlement promises. Each
+ * entry is a `deliverFinalOutput` awaited inside the IPC message handler that
+ * has NOT yet reached its `cb.onTurnTerminal` call; a settlement resolving
+ * enqueues the turn terminal. During graceful shutdown, after all worker IPC
+ * channels have disconnected (so no NEW settlement can be created), the daemon
+ * bounded-waits these to settle BEFORE closing the turn-terminal queue
+ * admission — otherwise a settlement that resolves post-close would have its
+ * terminal refused and lost. Returns a snapshot array (safe to Promise.all).
+ */
+export function snapshotCodexAppFinalSettlements(): Promise<boolean>[] {
+  return [...codexAppFinalSettlementInFlight.values()];
+}
+
+/** Current in-flight Codex App final-settlement count. After all worker IPC has
+ *  disconnected the map cannot grow, so a re-read of 0 after awaiting the
+ *  snapshot confirms settlement quiescence. */
+export function codexAppFinalSettlementCount(): number {
+  return codexAppFinalSettlementInFlight.size;
+}
 
 function finalOutputDedupeKey(ds: DaemonSession, msg: Extract<WorkerToDaemon, { type: 'final_output' }>): string {
   return `${msg.sessionId ?? ds.session.sessionId}:${msg.lastUuid || msg.turnId}`;
@@ -9523,6 +9711,53 @@ async function finishTurnReactions(ds: DaemonSession): Promise<void> {
  *  same provider key; the daemon owns bounded transient retries. After 3 attempts we log
  *  and give up — the user's answer is lost; better than leaking memory
  *  via an unbounded retry loop. */
+async function persistFinalOutputFeedback(
+  ds: DaemonSession,
+  msg: Extract<WorkerToDaemon, { type: 'final_output' }>,
+  content: string,
+  effectiveCliId: string,
+  messageId: string,
+  policy: import('../services/feedback-policy.js').FeedbackPolicy,
+  baseCard: Record<string, unknown>,
+  requesterSubjectId: string | undefined,
+  webhookDestinations: import('../services/feedback-outbox.js').FeedbackWebhookDestination[] | undefined,
+  logTag: string,
+): Promise<void> {
+  try {
+    const { getSkillFeedbackStore } = await import('../services/skill-feedback-store.js');
+    const feedbackStore = await getSkillFeedbackStore(config.session.dataDir);
+    feedbackStore.recordTurnDelivery({
+      botAppId: ds.larkAppId,
+      sessionId: ds.session.sessionId,
+      turnId: msg.turnId,
+      nativeSessionId: msg.sourceHermesSessionId ?? ds.session.cliSessionId,
+      platform: 'lark',
+      platformAppId: ds.larkAppId,
+      platformMessageId: messageId,
+      chatId: ds.chatId,
+      topicRootId: ds.session.rootMessageId,
+      dispatchAttempt: msg.dispatchAttempt,
+      content,
+      cliId: effectiveCliId,
+      cliVersion: ds.cliVersion,
+      model: ds.session.model,
+      reasoningEffort: ds.session.reasoningEffort,
+      cardMode: 'feedback',
+      status: 'delivered',
+      usage: msg.usage,
+      policy,
+      baseCard,
+      requesterSubjectId,
+      webhookDestinations,
+      context: { ...(resolveFeedbackTeamId({ dataDir: config.session.dataDir, chatId: ds.chatId }) ? { teamId: resolveFeedbackTeamId({ dataDir: config.session.dataDir, chatId: ds.chatId }) } : {}) },
+    });
+  } catch (error) {
+    logger.warn(
+      `[${logTag}] Failed to persist final-output feedback delivery: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+}
+
 function deliverFinalOutput(
   ds: DaemonSession,
   msg: Extract<WorkerToDaemon, { type: 'final_output' }>,
@@ -9764,6 +9999,12 @@ function deliverFinalOutput(
         : imOrigin?.replyTargetSenderOpenId
           ?? daemonCardFooterRecipientOpenId(ds, effectiveCliId);
       const localHomeLinkMode = daemonCardLocalHomeLinkMode(ds);
+      // forkWorker snapshots the effective policy for this worker lifetime.
+      // Keep daemon fallback delivery aligned with the same frozen policy the
+      // worker/Riff environment received; live config applies on the next fork.
+      const feedbackPolicy = managedReceiver ? undefined : ds.feedbackPolicy;
+      const feedbackRequesterSubjectId = recipientOpenId;
+      const feedback = feedbackPolicy && feedbackRequesterSubjectId ? { policy: feedbackPolicy } : undefined;
       cardUsage ??= getDaemonReplyCardUsageSnapshot(ds, effectiveCliId);
       const cardJson = msg.kind === 'local-turn' || msg.kind === 'local-turn-headless'
         ? buildContextualReplyCard({
@@ -9779,16 +10020,19 @@ function deliverFinalOutput(
             workingDir: ds.workingDir,
             localHomeLinkMode,
             usage: cardUsage,
+            ...(feedback ? { feedback } : {}),
           })
-        : buildMarkdownCard(
-            safeAssistantText,
+        : buildCanonicalFinalReplyCard({
+            markdown: safeAssistantText,
+            ...(feedback ? { feedback } : {}),
             recipientOpenId,
-            renderBrandTemplate(resolveBrandLabel(ds.larkAppId), ds.workingDir),
-            localeForBot(ds.larkAppId),
-            ds.workingDir,
+            brand: renderBrandTemplate(resolveBrandLabel(ds.larkAppId), ds.workingDir),
+            locale: localeForBot(ds.larkAppId),
+            workingDir: ds.workingDir,
             localHomeLinkMode,
-            cardUsage,
-          );
+            usage: cardUsage,
+          });
+      const baseFeedbackCard = feedback ? JSON.parse(cardJson) as Record<string, unknown> : undefined;
 
       const proposedOutput = {
         targetChatId: ds.chatId,
@@ -9877,6 +10121,9 @@ function deliverFinalOutput(
       };
       if (preparedListenerReply?.kind === 'succeeded' && preparedListenerReply.messageId) {
         recordPrimaryOutput(preparedListenerReply.messageId);
+        if (feedbackPolicy && baseFeedbackCard) {
+          await persistFinalOutputFeedback(ds, msg, safeAssistantText, effectiveCliId, preparedListenerReply.messageId, feedbackPolicy!, baseFeedbackCard, feedbackRequesterSubjectId, getBot(ds.larkAppId).config.feedbackWebhooks?.destinations, t);
+        }
         ds.lastBridgeEmittedUuid = finalOutputDedupeKey(ds, msg);
         logger.info(
           `[${t}] VC listener fallback replayed existing provider result `
@@ -9932,6 +10179,9 @@ function deliverFinalOutput(
       }
       ds.lastBridgeEmittedUuid = finalOutputDedupeKey(ds, msg);
       logger.info(`[${t}] Bridge final_output forwarded (turn ${msg.turnId.substring(0, 8)}, ${msg.content.length} chars, kind=${msg.kind ?? 'bridge'}, attempt ${attempt + 1})`);
+      if (feedbackPolicy && baseFeedbackCard && messageId) {
+        await persistFinalOutputFeedback(ds, msg, safeAssistantText, effectiveCliId, messageId, feedbackPolicy!, baseFeedbackCard, feedbackRequesterSubjectId, getBot(ds.larkAppId).config.feedbackWebhooks?.destinations, t);
+      }
       onComplete?.(true);
     } catch (err: any) {
       if (!isStillOwned()) { onComplete?.(false); return; }
@@ -10232,6 +10482,7 @@ export function forkAdoptWorker(ds: DaemonSession, opts?: { restoredFromMetadata
     cliPathOverride: agentCfg.cliPathOverride,
     cliSessionId: isStructuredBridge ? adopted.sessionId : undefined,
     model: agentCfg.model,
+    turnTimeoutMs: botCfg.turnTimeoutMs,
     disableCliBypass: botCfg.disableCliBypass === true,
     codexRpcInput: botCfg.codexRpcInput === true || config.codexRpcInputDefault,
     // Adopt is normally observe-only (prompt=''), driven later by 'message'
